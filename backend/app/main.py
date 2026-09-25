@@ -1,8 +1,10 @@
 import json
 import logging
 import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
@@ -177,8 +179,21 @@ def delete_repo(repo_id: int, user: CurrentUser):
                      (repo_id, user["id"]))
         conn.execute("DELETE FROM user_repositories WHERE repo_id = %s AND user_id = %s",
                      (repo_id, user["id"]))
-        conn.execute("DELETE FROM repositories WHERE id = %s AND NOT EXISTS "
-                     "(SELECT 1 FROM user_repositories WHERE repo_id = %s)", (repo_id, repo_id))
+        gone = conn.execute(
+            "DELETE FROM repositories WHERE id = %s AND NOT EXISTS "
+            "(SELECT 1 FROM user_repositories WHERE repo_id = %s) RETURNING local_path",
+            (repo_id, repo_id)).fetchone()
+    if gone and gone["local_path"]:
+        _remove_clone(Path(gone["local_path"]))
+
+
+def _remove_clone(path: Path) -> None:
+    """Delete a clone the app made. Only paths inside repos_dir: a repository
+    added as a local checkout is the user's own folder and is never touched."""
+    repos_dir = get_settings().repos_dir.resolve()
+    target = path.resolve()
+    if target.is_relative_to(repos_dir) and target != repos_dir:
+        shutil.rmtree(target, ignore_errors=True)
 
 
 # ----------------------------------------------------------------- exploration

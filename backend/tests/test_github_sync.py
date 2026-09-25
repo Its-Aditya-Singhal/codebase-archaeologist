@@ -120,3 +120,30 @@ def test_issues_listing_records_pr_comment_counts(api):
     result = fetch_issues("o", "r", SyncState())
     assert [i["number"] for i in result.items] == [4]
     assert result.pr_comment_counts == {5: 4}
+
+
+def test_rate_limited_first_request_restarts_the_crawl(api):
+    """A crawl stopped before its first page must not resume from the bare path:
+    that drops `state=all`, and GitHub would then list open items only."""
+    seen: list[str] = []
+
+    def limited(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(403, json={}, headers={"x-ratelimit-remaining": "0",
+                                                     "x-ratelimit-reset": "0"})
+    api(limited)
+    stopped = fetch_issues("o", "r", SyncState())
+    assert not stopped.complete and stopped.state == SyncState()
+
+    handler, calls = make_api(total=5)
+    api(handler)
+    again = fetch_issues("o", "r", stopped.state)
+    assert again.complete and "state=all" in calls[0]
+
+
+def test_stored_bare_path_resume_point_is_discarded():
+    state = SyncState.from_dict({"watermark": None, "next_url": "/repos/o/r/pulls",
+                                 "pending_watermark": None})
+    assert state == SyncState()
+    kept = SyncState.from_dict({"next_url": "https://api.github.com/x?page=2"})
+    assert kept.next_url == "https://api.github.com/x?page=2"

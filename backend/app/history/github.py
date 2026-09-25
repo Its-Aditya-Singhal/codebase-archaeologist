@@ -37,6 +37,10 @@ class SyncState:
     def from_dict(cls, d: dict | None) -> "SyncState":
         d = dict(d or {})
         d.pop("next_page", None)  # pre-cursor state format: restart that crawl
+        # A resume point that is a bare path (not a `next` link) lost the crawl's
+        # query, and resuming it would list open items only: restart instead.
+        if d.get("next_url") and not str(d["next_url"]).startswith("http"):
+            d["next_url"] = d["pending_watermark"] = None
         return cls(**d)
 
 
@@ -75,7 +79,12 @@ def _crawl(path: str, state: SyncState, keep=lambda item: True) -> FetchResult:
     def unfinished(note: str) -> FetchResult:
         result.complete = False
         result.note = note
-        result.state = SyncState(state.watermark, url, pending)
+        # Stopped before the first page: nothing to resume, start over next time
+        # (resuming from the bare path would drop the query, e.g. state=all).
+        if url == path:
+            result.state = SyncState(state.watermark)
+        else:
+            result.state = SyncState(state.watermark, url, pending)
         return result
 
     with _client() as client:

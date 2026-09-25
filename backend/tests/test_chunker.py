@@ -116,3 +116,23 @@ def test_plain_text_is_not_vim_help():
 
     assert detect_language("LICENSE.txt") is None
     assert detect_language("src/app.py") == "python"
+
+
+def test_remove_clone_only_touches_app_made_clones(tmp_path, monkeypatch):
+    from app import main
+
+    repos_dir = tmp_path / "repos"
+    clone = repos_dir / "o__r"
+    checkout = tmp_path / "my-project"  # a user's own local checkout
+    for d in (clone, checkout):
+        d.mkdir(parents=True)
+        (d / "file.py").write_text("x = 1\n")
+
+    class S:
+        pass
+    S.repos_dir = repos_dir
+    monkeypatch.setattr(main, "get_settings", lambda: S)
+    main._remove_clone(checkout)
+    main._remove_clone(repos_dir)
+    main._remove_clone(clone)
+    assert checkout.exists() and repos_dir.exists() and not clone.exists()
