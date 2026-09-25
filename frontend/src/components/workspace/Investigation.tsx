@@ -15,7 +15,14 @@ export interface InvestigationRecord {
   answer: string;
   status: "retrieving" | "answering" | "done" | "error";
   error?: string;
+  answeredBy?: { provider: "anthropic" | "ollama" | "briefing"; model: string };
 }
+
+const PROVIDER_LABEL = {
+  anthropic: "Claude",
+  ollama: "local model",
+  briefing: "evidence briefing · no language model",
+} as const;
 
 const SUGGESTIONS_FOCUSED = [
   "Why does this exist?",
@@ -199,6 +206,12 @@ function Record({
           </div>
         ) : record.status === "answering" ? (
           <p className="streaming-caret text-xs text-muted">Reasoning over {record.evidence.length} sources</p>
+        ) : null}
+        {record.answeredBy ? (
+          <p className="mt-2 font-mono text-[9.5px] uppercase tracking-[0.14em] text-faint">
+            {PROVIDER_LABEL[record.answeredBy.provider]}
+            {record.answeredBy.provider !== "briefing" ? ` · ${record.answeredBy.model}` : ""}
+          </p>
         ) : null}
         {record.status === "error" ? (
           <div className="mt-2 flex gap-2 rounded border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">

@@ -118,7 +118,8 @@ export function Workspace({ repoId }: { repoId: number }) {
       for await (const ev of ask(repoId, question, askedFocus, abort.current.signal)) {
         if (ev.event === "sources") update(id, () => ({ evidence: ev.data, status: "answering" }));
         else if (ev.event === "delta") update(id, (r) => ({ answer: r.answer + ev.data.text }));
-        else if (ev.event === "done") update(id, () => ({ status: "done" }));
+        else if (ev.event === "done")
+          update(id, () => ({ status: "done", answeredBy: { provider: ev.data.provider, model: ev.data.model } }));
         else if (ev.event === "error") update(id, () => ({ status: "error", error: ev.data.message }));
       }
       update(id, (r) => (r.status === "answering" ? { status: "done" } : {}));

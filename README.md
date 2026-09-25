@@ -30,8 +30,10 @@ and cites every source, so the developer can check it.
 - Impact analysis: everything that reaches the code (3 hops), the tests that exercise it,
   files that historically change with it, and a change-risk verdict with its reasons. "What
   would break if…" questions get this as cited evidence.
-- Streamed answers from Claude with inline `[S#]` citations; clicking one opens the source
-  (code, commit, PR or issue)
+- Streamed, cited answers with inline `[S#]` citations; clicking one opens the source
+  (code, commit, PR or issue). Three answer writers, picked automatically:
+  an **evidence briefing** (no model, free, the default), a **local model via Ollama** (free),
+  or **Claude** (paid API key, strongest answers)
 
 ## Stack
 
@@ -41,7 +43,7 @@ and cites every source, so the developer can check it.
 | API | Python 3.13, FastAPI | Ingestion/parsing/ML ecosystem (tree-sitter, local embeddings) lives in Python |
 | Data | PostgreSQL 17 + pgvector (HNSW), `tsvector` | One store for relational data, vectors, full-text and the graph (node/edge tables) |
 | Embeddings | `BAAI/bge-small-en-v1.5` via fastembed (local) | Indexing needs no API key; swappable behind `Embedder` |
-| Answers | Claude Opus 5 via the Anthropic SDK | Long-context reasoning over code with strict citation discipline |
+| Answers | Evidence briefing (no model) · Ollama local model · Claude Opus 5 | Works for free out of the box; better writers are drop-in |
 
 ## Setup
 
@@ -57,7 +59,7 @@ createdb archaeologist
 ```bash
 # API: http://localhost:8000 (tables are created on startup)
 cd backend
-cp .env.example .env        # ANTHROPIC_API_KEY for answers; GITHUB_TOKEN strongly recommended
+cp .env.example .env        # everything is optional; see "Answers" below
 uv sync
 uv run uvicorn app.main:app --port 8000 --reload --reload-dir app
 ```
@@ -71,6 +73,17 @@ cd frontend
 npm install
 npm run dev
 ```
+
+### Answers (all free options work without an account)
+
+| Writer | Setup | What you get |
+|---|---|---|
+| Evidence briefing | nothing | A cited digest of the evidence: what the code is, where it came from, what calls it, impact. No interpretation. |
+| Local model (Ollama) | `brew install ollama`, `ollama serve`, `ollama pull qwen2.5-coder:7b` (~4.7 GB; 16 GB RAM recommended) | Written, cited answers, generated on your machine |
+| Claude | `ANTHROPIC_API_KEY` in `backend/.env` (paid) | The strongest reasoning and citation discipline |
+
+`ANSWER_PROVIDER=auto` (default) uses Claude if a key is set, else Ollama if it is running with
+the model pulled, else the briefing. `OLLAMA_MODEL` picks another local model.
 
 The first indexing run downloads the embedding model (~130 MB). Without `GITHUB_TOKEN` the
 GitHub API allows 60 requests/hour, so PR/issue sync for larger repos finishes over several

@@ -274,7 +274,15 @@ export const api = {
 export type AskEvent =
   | { event: "sources"; data: Evidence[] }
   | { event: "delta"; data: { text: string } }
-  | { event: "done"; data: { stop_reason: string; model: string; usage: Record<string, number> } }
+  | {
+      event: "done";
+      data: {
+        stop_reason: string;
+        model: string;
+        provider: "anthropic" | "ollama" | "briefing";
+        usage: Record<string, number>;
+      };
+    }
   | { event: "error"; data: { message: string } };
 
 /** POST /ask and yield server-sent events as they arrive. */

@@ -22,11 +22,21 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
 
-    # Answering model. Credentials are resolved by the Anthropic SDK
-    # (ANTHROPIC_API_KEY or an `ant auth login` profile).
+    # Who writes answers: "auto" picks Claude when an API key is set, else a
+    # local Ollama model when one is running, else an evidence briefing (no model).
+    # Force one with "anthropic" | "ollama" | "briefing".
+    answer_provider: str = "auto"
+
+    # Claude (paid API). The key is read from backend/.env or the environment.
+    anthropic_api_key: str | None = None
     answer_model: str = "claude-opus-5"
     answer_effort: str = "medium"
     answer_max_tokens: int = 16000
+
+    # Local model via Ollama (free, runs on this machine).
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5-coder:7b"
+    ollama_num_ctx: int = 16384  # context window; evidence is trimmed to fit
 
     # Ingestion limits.
     max_file_bytes: int = 400_000
