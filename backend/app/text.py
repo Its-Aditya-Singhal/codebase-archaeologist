@@ -63,3 +63,27 @@ def query_terms(question: str, limit: int = 24) -> list[str]:
                 continue
             terms.append(t)
     return terms[:limit]
+
+
+_SUFFIXES = ("ations", "ation", "ings", "ing", "ers", "ies", "er", "es", "ed", "s")
+
+
+def word_stem(term: str) -> str:
+    """Strip one common English suffix, keeping at least four characters."""
+    for suffix in _SUFFIXES:
+        if term.endswith(suffix) and len(term) - len(suffix) >= 4:
+            return term[: -len(suffix)]
+    return term
+
+
+def lexical_query(terms: list[str]) -> str:
+    """A to_tsquery OR-query where each term also matches other word forms and
+    longer identifiers: "escaping" -> escap:* (escape, escaped), "speed" ->
+    speed:* (speedups). Short terms stay exact to avoid matching everything."""
+    parts: list[str] = []
+    for t in terms:
+        root = word_stem(t)
+        part = f"{root}:*" if len(root) >= 4 else t
+        if part not in parts:
+            parts.append(part)
+    return " | ".join(parts)

@@ -33,7 +33,13 @@ export function PrChip({ pr }: { pr: PullRequestRef }) {
   );
   const cls = `inline-flex items-center gap-1 rounded border px-1.5 py-px font-mono text-[10px] ${tone}`;
   return pr.url ? (
-    <a href={pr.url} target="_blank" rel="noreferrer" className={`${cls} hover:bg-ink-800`}>
+    <a
+      href={pr.url}
+      target="_blank"
+      rel="noreferrer"
+      title={pr.title ? undefined : "Details not fetched from GitHub yet; opens the pull request"}
+      className={`${cls} hover:bg-ink-800`}
+    >
       {body}
     </a>
   ) : (

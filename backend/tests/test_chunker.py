@@ -102,3 +102,17 @@ def test_path_filters():
 def test_query_identifiers_keep_qualified_names():
     from app.text import query_identifiers
     assert query_identifiers("Why is Job.fetch implemented this way?") == ["job.fetch"]
+
+
+def test_lexical_query_matches_word_forms():
+    from app.text import lexical_query
+
+    q = lexical_query(["escaping", "speed", "extension", "api", "queues"])
+    assert q == "escap:* | speed:* | extension:* | api | queu:*"
+
+
+def test_plain_text_is_not_vim_help():
+    from app.ingestion.chunker import detect_language
+
+    assert detect_language("LICENSE.txt") is None
+    assert detect_language("src/app.py") == "python"

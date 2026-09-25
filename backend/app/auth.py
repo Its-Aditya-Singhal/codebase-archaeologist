@@ -144,7 +144,7 @@ def authorize(request: Request, user: CurrentUser) -> None:
 class SignupIn(BaseModel):
     email: str = Field(max_length=254)
     password: str = Field(min_length=8, max_length=256)
-    name: str = Field(default="", max_length=100)
+    name: str = Field(max_length=100)  # required; blank is rejected with a clear message
 
 
 class LoginIn(BaseModel):
@@ -162,6 +162,9 @@ def signup(body: SignupIn, request: Request, response: Response):
     if not get_settings().allow_signup:
         raise HTTPException(403, "Sign-up is disabled on this server")
     email = body.email.strip().lower()
+    name = " ".join(body.name.split())
+    if not name:
+        raise HTTPException(422, "Enter your name")
     if not _EMAIL.match(email):
         raise HTTPException(422, "Enter a valid email address")
     if body.password.strip() != body.password or len(set(body.password)) < 4:
@@ -173,7 +176,7 @@ def signup(body: SignupIn, request: Request, response: Response):
         user = conn.execute(
             "INSERT INTO users (email, name, password_hash) VALUES (%s, %s, %s) "
             "RETURNING id, email, name, created_at",
-            (email, body.name.strip(), hash_password(body.password))).fetchone()
+            (email, name, hash_password(body.password))).fetchone()
         _adopt_unowned(conn, user["id"])
     _start_session(response, request, user["id"])
     return user

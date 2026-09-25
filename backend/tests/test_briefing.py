@@ -29,3 +29,31 @@ def test_briefing_cites_code_history_and_graph():
     assert "merged in PR #12 “Fetch jobs” [S3]" in text
     assert "PR #12 explains: *Jobs can now be loaded by id.* [S3]" in text
     assert "Called from `run` in `rq/worker.py` [S4]" in text
+
+
+def test_summary_line_completes_wrapped_first_sentence():
+    from app.answering.briefing import _summary_line
+
+    code = ('def escape(s):\n    """Replace the characters in\n    the string with safe '
+            'sequences. Use this for HTML.\n    """\n')
+    assert _summary_line(code) == "Replace the characters in the string with safe sequences."
+    assert _summary_line('def f():\n    """Short summary."""\n') == "Short summary."
+    assert _summary_line("# Parse the config and\n# return settings\ndef parse(): ...") == (
+        "Parse the config and return settings.")
+
+
+def test_briefing_does_not_present_an_unrelated_match_as_the_subject():
+    chunks = [
+        _chunk("code", "def test_format():\n    class User: ...\n", ["semantic"],
+               path="tests/test_fmt.py", symbol_kind="function", symbol_name="test_format",
+               start_line=1, end_line=2),
+        _chunk("doc", "Formatting strings", ["semantic"], path="docs/fmt.rst",
+               start_line=1, end_line=9),
+    ]
+    text = build_briefing("Which database does it use to store user sessions?", chunks)
+    assert text.startswith("The retrieved sources don't directly address this question.")
+    assert "is defined in" not in text
+    assert "- Docs: `docs/fmt.rst` lines 1–9 [S2]" in text
+
+    related = build_briefing("How does test_format handle formatting?", chunks)
+    assert related.startswith("`test_format` (function) is defined in")

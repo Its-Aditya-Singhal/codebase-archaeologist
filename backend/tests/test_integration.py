@@ -156,7 +156,7 @@ def client(embedder):
     from app.main import app
     with TestClient(app) as c:
         assert c.get("/api/repos").status_code == 401  # everything needs an account
-        r = c.post("/api/auth/signup", json={"email": "Ann@Example.com",
+        r = c.post("/api/auth/signup", json={"email": "Ann@Example.com", "name": "Ann",
                                               "password": "correct horse battery"})
         assert r.status_code == 201, r.text
         yield c
@@ -325,11 +325,21 @@ def test_accounts_and_isolation(client, indexed, sample_repo):
     rid = indexed["id"]
     other = TestClient(app)  # no `with`: the app's lifespan belongs to `client`
     assert other.post("/api/auth/signup", json={
-        "email": "ann@example.com", "password": "another password"}).status_code == 409
+        "email": "ann@example.com", "name": "Ann 2",
+        "password": "another password"}).status_code == 409
     assert other.post("/api/auth/signup", json={
-        "email": "bob@example.com", "password": "short"}).status_code == 422
+        "email": "bob@example.com", "password": "bobs secret pass"}).status_code == 422
+    missing = other.post("/api/auth/signup", json={"email": "bob@example.com",
+                                                    "password": "bobs secret pass"})
+    assert "bobs secret pass" not in missing.text  # never echo submitted values
     assert other.post("/api/auth/signup", json={
-        "email": "bob@example.com", "password": "bobs secret pass"}).status_code == 201
+        "email": "bob@example.com", "name": "   ",
+        "password": "bobs secret pass"}).status_code == 422
+    assert other.post("/api/auth/signup", json={
+        "email": "bob@example.com", "name": "Bob", "password": "short"}).status_code == 422
+    assert other.post("/api/auth/signup", json={
+        "email": "bob@example.com", "name": "Bob",
+        "password": "bobs secret pass"}).status_code == 201
     # Bob cannot see or reach Ann's repository or investigations.
     assert other.get("/api/repos").json() == []
     assert other.get(f"/api/repos/{rid}").status_code == 404

@@ -146,9 +146,9 @@ export function Workspace({ repoId }: { repoId: number }) {
         <Link href="/app" className="rounded p-1 text-faint hover:bg-ink-800 hover:text-parchment" title="All sites">
           <ArrowLeft className="size-4" />
         </Link>
-        <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-lamp">Archaeologist</span>
-        <span className="text-ink-600">/</span>
-        <span className="truncate font-mono text-sm">
+        <span className="hidden font-mono text-[10px] uppercase tracking-[0.2em] text-lamp sm:inline">Archaeologist</span>
+        <span className="hidden text-ink-600 sm:inline">/</span>
+        <span className="min-w-0 truncate font-mono text-sm">
           {repo?.owner ? `${repo.owner}/` : ""}
           <span className="font-semibold">{repo?.name}</span>
         </span>
@@ -171,7 +171,9 @@ export function Workspace({ repoId }: { repoId: number }) {
             ) : null}
           </span>
         ) : null}
-        <UserMenu compact />
+        <div className="shrink-0">
+          <UserMenu compact />
+        </div>
       </header>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)_420px]">

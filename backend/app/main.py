@@ -5,9 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import auth, investigations
@@ -74,6 +75,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(auth.router)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    """Validation errors without the submitted values: FastAPI echoes the
+    request body by default, which would send passwords back (and into logs)."""
+    return JSONResponse(status_code=422, content={"detail": [
+        {"loc": e.get("loc"), "msg": e.get("msg"), "type": e.get("type")}
+        for e in exc.errors()]})
+
 # Everything else needs a logged-in user, who only sees their own repositories
 # and investigations (see auth.authorize).
 api = APIRouter(dependencies=[Depends(auth.authorize)])

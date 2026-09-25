@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { motion } from "motion/react";
@@ -14,12 +14,22 @@ import { useAuth } from "./AuthProvider";
 /** Only same-site paths are followed after login, never another origin. */
 function nextPath(): string {
   const next = new URLSearchParams(window.location.search).get("next") ?? "/app";
-  return next.startsWith("/") && !next.startsWith("//") && next !== "/" ? next : "/app";
+  // Resolve it the way the browser would ("/\evil.com" means "//evil.com")
+  // and follow it only if it stays on this site.
+  let url: URL;
+  try {
+    url = new URL(next, window.location.origin);
+  } catch {
+    return "/app";
+  }
+  if (url.origin !== window.location.origin || url.pathname === "/") return "/app";
+  return url.pathname + url.search + url.hash;
 }
 
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const router = useRouter();
   const { user, setUser } = useAuth();
+  const ids = useId();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -41,6 +51,10 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (signup && !name.trim()) {
+      setError("Enter your name");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -81,9 +95,11 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
 
           <form onSubmit={submit} className="mt-8 space-y-3">
             {signup ? (
-              <label className="block">
-                <span className="mb-1 block text-xs text-muted">Name (optional)</span>
+              <label className="block" htmlFor={`${ids}-name`}>
+                <span className="mb-1 block text-xs text-muted">Name</span>
                 <input
+                  id={`${ids}-name`}
+                  required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   autoComplete="name"
@@ -92,9 +108,10 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
                 />
               </label>
             ) : null}
-            <label className="block">
+            <label className="block" htmlFor={`${ids}-email`}>
               <span className="mb-1 block text-xs text-muted">Email</span>
               <input
+                id={`${ids}-email`}
                 type="email"
                 required
                 value={email}
@@ -103,9 +120,10 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
                 className={field}
               />
             </label>
-            <label className="block">
+            <label className="block" htmlFor={`${ids}-password`}>
               <span className="mb-1 block text-xs text-muted">Password</span>
               <input
+                id={`${ids}-password`}
                 type="password"
                 required
                 minLength={signup ? 8 : undefined}

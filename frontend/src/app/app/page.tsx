@@ -69,6 +69,10 @@ export default function Sites() {
   }
 
   const firstName = user?.name?.split(" ")[0];
+  // Accounts created in the last hour get a first-visit greeting.
+  const [isNew] = useState(
+    () => !!user && Date.now() - new Date(user.created_at).getTime() < 3_600_000,
+  );
 
   return (
     <div className="grain relative min-h-full overflow-x-clip">
@@ -90,7 +94,7 @@ export default function Sites() {
           transition={{ duration: 0.7, ease: EASE }}
         >
           <p className="font-mono text-xs uppercase tracking-[0.25em] text-lamp">
-            {firstName ? `Welcome back, ${firstName}` : "Your dig sites"}
+            {firstName ? `${isNew ? "Welcome" : "Welcome back"}, ${firstName}` : "Your dig sites"}
           </p>
           <h1 className="mt-4 font-display text-4xl leading-[1.05] text-parchment sm:text-6xl">
             Which codebase are we <em className="text-lamp">excavating</em> today?

@@ -38,7 +38,11 @@ export function ImpactView({
               <p className="text-[13px] leading-snug text-parchment">
                 Changing <span className="font-mono text-lamp">{data.target.label}</span>{" "}
                 {s.transitive
-                  ? `could affect ${s.transitive} other definition${s.transitive === 1 ? "" : "s"} in ${s.files} file${s.files === 1 ? "" : "s"}.`
+                  ? `could affect ${s.transitive} other definition${s.transitive === 1 ? "" : "s"}${
+                      s.files
+                        ? ` across ${s.files} other file${s.files === 1 ? "" : "s"}.`
+                        : `, all in this file.`
+                    }`
                   : "affects no other production code the static graph can see."}
               </p>
               <ul className="mt-1.5 space-y-0.5 text-[11.5px] text-muted">
@@ -55,7 +59,7 @@ export function ImpactView({
           <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
             <Stat label="direct dependents" value={s.direct} />
             <Stat label="reach (≤3 hops)" value={s.transitive} />
-            <Stat label="files affected" value={s.files} />
+            <Stat label="other files affected" value={s.files} />
             <Stat label="tests reaching it" value={s.tests} tone={s.tests ? "evidence" : "danger"} />
           </div>
 

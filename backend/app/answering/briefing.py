@@ -9,6 +9,7 @@ uses. It is the free default when no model is configured.
 import re
 
 from app.retrieval.hybrid import RetrievedChunk
+from app.text import query_terms, word_stem
 
 _DOC_COMMENT = re.compile(
     r'^\s*(?:"""|\'\'\'|/\*\*?|//+|#+(?!!)|\*)\s?(.*?)\s*(?:"""|\'\'\'|\*/)?$')
@@ -25,10 +26,43 @@ def _summary_line(code: str) -> str | None:
             continue
         m = _DOC_COMMENT.match(line)
         if m and m.group(1) and len(m.group(1)) > 8:
-            return m.group(1).rstrip(".") + "."
+            return _first_sentence(m.group(1), stripped, lines[i + 1:])
         if not m:
             return None
     return None
+
+
+_SENTENCE_END = re.compile(r"[.!?]$")
+_QUOTES = ('"""', "'''")
+
+
+def _first_sentence(text: str, opening: str, rest: list[str]) -> str:
+    """Complete a wrapped first sentence from the docstring's or comment's
+    following lines, stopping at a blank line or the end of the docstring."""
+    docstring = opening.startswith(_QUOTES)
+    closed = docstring and len(opening) > 3 and opening.endswith(_QUOTES)
+    for line in rest:
+        if _SENTENCE_END.search(text) or closed or len(text) > 300:
+            break
+        nxt = line.strip()
+        if not nxt:
+            break
+        if docstring:
+            if nxt.endswith(_QUOTES):
+                nxt, closed = nxt[:-3].strip(), True
+        else:
+            m = _DOC_COMMENT.match(line)
+            if not m or not m.group(1):
+                break
+            nxt = m.group(1)
+        if nxt:
+            text += " " + nxt
+    first = re.match(r"(.+?[.!?])(?:\s|$)", text)
+    return (first.group(1) if first else text).rstrip(".") + "."
+
+
+def _span(c: RetrievedChunk) -> str:
+    return f"`{c.path}` lines {c.start_line}–{c.end_line}"
 
 
 def _date(value) -> str:
@@ -41,12 +75,22 @@ def build_briefing(question: str, chunks: list[RetrievedChunk]) -> str:
     out: list[str] = []
 
     # What the code is.
+    # The subject is the selected code, else code the question names, else the
+    # best code match that shares at least half of the question's key words;
+    # retrieval always returns *something*, and presenting an unrelated match
+    # as the answer's subject would mislead.
+    stems = [word_stem(t) for t in query_terms(question)]
+
+    def shares_word(c: RetrievedChunk) -> bool:
+        text = f"{c.path} {c.symbol_name or ''} {c.content}".lower()
+        return bool(stems) and 2 * sum(t in text for t in stems) >= len(stems)
     focus = by(lambda c: "focus" in c.matched_by and c.source_type == "code")
     named = by(lambda c: c.source_type == "code" and "symbol" in c.matched_by)
-    subject = (focus or named or by(lambda c: c.source_type == "code"))[:1]
+    subject = (focus or named or by(lambda c: c.source_type == "code" and shares_word(c)))[:1]
     for c in subject:
-        what = f"`{c.symbol_name}` ({c.symbol_kind})" if c.symbol_name else "This code"
-        line = f"{what} is defined in `{c.path}` lines {c.start_line}–{c.end_line} {ref[id(c)]}."
+        where = f"`{c.path}` lines {c.start_line}–{c.end_line} {ref[id(c)]}"
+        line = (f"`{c.symbol_name}` ({c.symbol_kind}) is defined in {where}." if c.symbol_name
+                else f"The closest matching code is {where}.")
         if summary := _summary_line(c.content):
             line += f" Its own description: *{summary}*"
         out.append(line)
@@ -112,11 +156,17 @@ def build_briefing(question: str, chunks: list[RetrievedChunk]) -> str:
     discussion = by(lambda c: c.source_type in ("pull_request", "issue", "commit")
                     and "history" not in c.matched_by)[:4]
     if docs or other_code or discussion:
-        out.append("\n**Also relevant**")
+        if out:
+            out.append("\n**Also relevant**")
+        else:
+            out.append("The retrieved sources don't directly address this question. "
+                       "These are the closest matches:")
     for c in docs:
-        out.append(f"- Docs: “{c.symbol_name or c.path}” in `{c.path}` {ref[id(c)]}")
+        out.append(f"- Docs: “{c.symbol_name}” in `{c.path}` {ref[id(c)]}" if c.symbol_name
+                   else f"- Docs: {_span(c)} {ref[id(c)]}")
     for c in other_code:
-        out.append(f"- Code: `{c.symbol_name or c.path}` in `{c.path}` {ref[id(c)]}")
+        out.append(f"- Code: `{c.symbol_name}` in `{c.path}` {ref[id(c)]}" if c.symbol_name
+                   else f"- Code: {_span(c)} {ref[id(c)]}")
     for c in discussion:
         title = c.metadata.get("title") or c.content.splitlines()[0]
         label = {"pull_request": f"PR #{c.metadata.get('number')}",
@@ -128,5 +178,6 @@ def build_briefing(question: str, chunks: list[RetrievedChunk]) -> str:
         out.append("The retrieved sources don't directly describe this; open them below.")
     out.append("\n---\n*Evidence briefing, assembled without a language model: it lays out what "
                "the sources show but doesn't interpret them for your question. For written "
-               "answers, run a free local model with Ollama (see the README).*")
+               "answers, add a free Google AI Studio key as GEMINI_API_KEY in backend/.env, or run "
+               "a local model with Ollama (see the README).*")
     return "\n".join(out)

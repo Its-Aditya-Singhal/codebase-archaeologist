@@ -12,9 +12,13 @@ def _linked(repo_id: int, shas: list[str]) -> tuple[dict[str, list[dict]], dict[
     """sha -> PRs, and PR number -> issues, for the given commits."""
     with connection() as conn:
         commit_prs = conn.execute(
-            """SELECT l.src_key AS sha, l.dst_key AS number, p.title, p.state, p.url, p.author,
-                      p.merged_at
-               FROM links l LEFT JOIN pull_requests p
+            """SELECT l.src_key AS sha, l.dst_key AS number, p.title, p.state, p.author,
+                      p.merged_at,
+                      -- a PR known only from a merge commit still links to GitHub
+                      coalesce(p.url, CASE WHEN r.url LIKE 'https://github.com/%%'
+                                           THEN r.url || '/pull/' || l.dst_key END) AS url
+               FROM links l JOIN repositories r ON r.id = l.repo_id
+               LEFT JOIN pull_requests p
                  ON p.repo_id = l.repo_id AND p.number = l.dst_key::int
                WHERE l.repo_id = %s AND l.src_type = 'commit' AND l.src_key = ANY(%s)
                  AND l.dst_type = 'pull_request'""", (repo_id, shas)).fetchall()

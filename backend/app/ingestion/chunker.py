@@ -122,6 +122,8 @@ def _parser(language: str):
 
 
 def detect_language(path: str) -> str | None:
+    if path.lower().endswith(".txt"):
+        return None  # plain text; the grammar pack would call every .txt Vim help ("vimdoc")
     try:
         return tslp.detect_language_from_path(path)
     except Exception:

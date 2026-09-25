@@ -110,7 +110,7 @@ re-indexes (it resumes where it stopped). With a token it completes in one run.
 
 | Method | Path | |
 |---|---|---|
-| `POST` | `/api/auth/signup` `{email, password, name?}` · `/api/auth/login` · `/api/auth/logout` | sets / clears the session cookie |
+| `POST` | `/api/auth/signup` `{email, password, name}` · `/api/auth/login` · `/api/auth/logout` | sets / clears the session cookie |
 | `GET` | `/api/auth/me` · `/api/auth/config` | current user · whether sign-up is open |
 | `POST` | `/api/repos` `{url}` | register + start indexing |
 | `GET` | `/api/repos`, `/api/repos/{id}` | status, progress, stats |

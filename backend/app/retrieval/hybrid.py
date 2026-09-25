@@ -28,7 +28,7 @@ from app.history.provenance import (
     linked_records,
     range_provenance,
 )
-from app.text import query_identifiers, query_terms
+from app.text import lexical_query, query_identifiers, query_terms
 
 RRF_K = 60
 CANDIDATES = 50
@@ -114,7 +114,7 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
                 f"{question}\n{primary['symbol_name'] or ''}\n{primary['content'][:1500]}")
         qvec = get_embedder().embed_query(retrieval_text)
         terms = query_terms(" ".join([question, *focus_symbols]))
-        tsquery = " | ".join(terms)
+        tsquery = _selective_query(conn, repo_id, lexical_query(terms))
 
         # 2. Dense retrieval.
         add(conn.execute(
@@ -214,6 +214,33 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
     if impact_chunk is not None:
         results.insert(len(pinned), impact_chunk)
     return _expand_history_hits(repo_id, results)
+
+
+COMMON_TERM_SHARE = 0.25  # a term in more chunks than this says little (e.g. the repo name)
+
+
+def _selective_query(conn, repo_id: int, tsquery: str) -> str:
+    """Drop query terms that match a large share of the repository's chunks.
+    `ts_rank_cd` has no IDF, so a ubiquitous term (the project's own name)
+    would otherwise let any chunk that repeats it outrank one matching the
+    rare, telling terms."""
+    parts = [p.strip() for p in tsquery.split("|") if p.strip()]
+    if len(parts) < 2:
+        return tsquery
+    rows = conn.execute(
+        """SELECT p, (SELECT count(*) FROM chunks
+                      WHERE repo_id = %(r)s AND source_type IN ('code', 'doc')
+                        AND tsv @@ to_tsquery('simple', p)) AS df
+           FROM unnest(%(parts)s::text[]) AS p""",
+        {"r": repo_id, "parts": parts}).fetchall()
+    # Measured over code and docs: history text (commit messages) is a
+    # different vocabulary and would make the project's name look rare.
+    total = conn.execute("SELECT count(*) AS n FROM chunks WHERE repo_id = %s "
+                         "AND source_type IN ('code', 'doc')", (repo_id,)).fetchone()["n"] or 1
+    kept = [r["p"] for r in rows if r["df"] <= total * COMMON_TERM_SHARE]
+    # With fewer than two specific terms left the question is mostly about the
+    # common ones ("where is the Redis connection configured?"): keep them all.
+    return " | ".join(kept) if len(kept) >= 2 else tsquery
 
 
 def _code_anchor(focus_rows: list[dict], rows_by_id: dict, matched: dict, scores: dict
