@@ -23,6 +23,16 @@ that touched the code in question within its current file; role="modified" commi
 later. Line history does not follow code across files, so if the introducing commit looks like \
 a move, rename or bulk refactor, say the code likely predates it. Name authors, dates, commit \
 SHAs (short form) and PR/issue numbers when they matter to the answer.
+- "What calls this", "what depends on this" and "what would break" questions are answered from \
+the static dependency graph. A code source with a `relation` attribute (e.g. relation="calls \
+Queue.enqueue") was retrieved because the graph links it to the code in question; a \
+type="graph" source is an impact analysis listing direct and indirect dependents, the tests \
+that reach the code, files that change in the same commits, and a heuristic risk level with \
+its reasons. The graph is built by name-based static analysis: edges marked as inferred by \
+name, or with confidence below 1, are probable rather than certain, so say "likely"; dynamic \
+dispatch, reflection, callbacks passed as values and string-based lookups are invisible to \
+it, so a missing caller is not proof that nothing calls the code. Co-change counts come from \
+commit history and show coupling that static analysis cannot.
 - Rationale stated in a PR description, issue or commit message is evidence; quote or \
 paraphrase it and cite it. If no history source explains the motivation, say so, and explain \
 what the code, docs and diffs do reveal about intent (comments, naming, configuration, usage).
@@ -52,6 +62,10 @@ def format_evidence(chunks, repo_name: str, focus_desc: str | None, sources_avai
             attrs.append(f'lines="{c.start_line}-{c.end_line}"')
         if c.source_type in ("code", "doc") and c.symbol_name:
             attrs.append(f'symbol="{c.symbol_kind} {c.symbol_name}"')
+        if c.source_type == "graph":
+            attrs.append(f'analysis="impact of {_attr(c.symbol_name)}"')
+        if (c.metadata or {}).get("graph"):
+            attrs.append(f'relation="{_attr(c.metadata["graph"])}"')
         attrs += _history_attrs(c.source_type, c.metadata or {})
         parts.append(f"<source {' '.join(attrs)}>\n{c.content}\n</source>")
     parts.append("</evidence>")

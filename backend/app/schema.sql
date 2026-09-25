@@ -2,7 +2,7 @@
 --
 -- `chunks` is deliberately source-agnostic: code, docs, commits, pull requests
 -- and issues all flow through the same retrieval path. Relationships between
--- records live in `links` (and, in phase 3, a fuller entity/edge graph).
+-- records live in `links`; the unified knowledge graph is `graph_nodes`/`graph_edges`.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -146,3 +146,42 @@ CREATE TABLE IF NOT EXISTS links (
     PRIMARY KEY (repo_id, src_type, src_key, dst_type, dst_key, kind)
 );
 CREATE INDEX IF NOT EXISTS links_dst_idx ON links (repo_id, dst_type, dst_key);
+
+-- ------------------------------------------------------- phase 3: knowledge graph
+
+-- One graph over code and history. Node kinds:
+--   file | symbol | module (external import) | dependency (declared in a manifest)
+--   | commit | pull_request | issue | author
+-- `key` is unique per kind: a path, "path::Qualified.name", a sha, a PR/issue number...
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    id          BIGSERIAL PRIMARY KEY,
+    repo_id     BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    label       TEXT NOT NULL,
+    path        TEXT,
+    start_line  INTEGER,
+    end_line    INTEGER,
+    chunk_id    BIGINT REFERENCES chunks(id) ON DELETE SET NULL,
+    data        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (repo_id, kind, key)
+);
+CREATE INDEX IF NOT EXISTS graph_nodes_path_idx ON graph_nodes (repo_id, path);
+CREATE INDEX IF NOT EXISTS graph_nodes_chunk_idx ON graph_nodes (chunk_id);
+
+-- Edge kinds: defines, contains, calls, inherits, imports, declares, modifies,
+-- authored, merged_in, part_of, fixes, mentions.
+-- `weight` counts occurrences (call sites, lines changed); `confidence` is how
+-- sure static resolution is (1 = explicit import/same scope, <0.5 = name match).
+CREATE TABLE IF NOT EXISTS graph_edges (
+    repo_id     BIGINT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    src         BIGINT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    dst         BIGINT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    weight      REAL NOT NULL DEFAULT 1,
+    confidence  REAL NOT NULL DEFAULT 1,
+    data        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY (src, kind, dst)
+);
+CREATE INDEX IF NOT EXISTS graph_edges_dst_idx ON graph_edges (dst, kind);
+CREATE INDEX IF NOT EXISTS graph_edges_repo_kind_idx ON graph_edges (repo_id, kind);

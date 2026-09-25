@@ -1,4 +1,4 @@
-import { CircleDot, GitCommitHorizontal, GitPullRequest } from "lucide-react";
+import { CircleDot, GitCommitHorizontal, GitPullRequest, Radar } from "lucide-react";
 import type { IssueRef, PullRequestRef } from "@/lib/api";
 
 export function formatDate(iso: string | null | undefined): string {
@@ -14,6 +14,7 @@ export const TYPE_ICON = {
   commit: GitCommitHorizontal,
   pull_request: GitPullRequest,
   issue: CircleDot,
+  graph: Radar,
 } as const;
 
 const STATE_TONE: Record<string, string> = {

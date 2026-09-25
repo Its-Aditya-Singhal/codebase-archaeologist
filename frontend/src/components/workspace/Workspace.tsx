@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Code2, GitCommitHorizontal, History, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Code2, GitCommitHorizontal, History, Network, TriangleAlert } from "lucide-react";
 import { api, ask, type Evidence, type FileDetail, type Focus, type Repo, type RepoFile } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { FileExplorer } from "./FileExplorer";
@@ -10,11 +10,13 @@ import { CodeViewer, type Highlight } from "./CodeViewer";
 import { InvestigationPanel, type InvestigationRecord } from "./Investigation";
 import { TimelinePanel } from "@/components/history/TimelinePanel";
 import { CommitView, RecordView } from "@/components/history/RecordViews";
+import { RelationsPanel, type RelationsMode } from "@/components/graph/RelationsPanel";
 
 /** What the centre panel shows. */
 type CenterView =
   | { kind: "code" }
   | { kind: "history" }
+  | { kind: "relations" }
   | { kind: "commit"; sha: string; path: string | null }
   | { kind: "record"; evidence: Evidence };
 
@@ -27,13 +29,13 @@ export function Workspace({ repoId }: { repoId: number }) {
   const [records, setRecords] = useState<InvestigationRecord[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [view, setView] = useState<CenterView>({ kind: "code" });
+  const [relMode, setRelMode] = useState<RelationsMode>("graph");
   const abort = useRef<AbortController | null>(null);
 
   const currentPath = useRef<string | null>(null);
-  const openFile = useCallback(
-    async (path: string, hl: Highlight | null = null) => {
-      setView({ kind: "code" });
-      setHighlight(hl);
+  /** Load a file into the code viewer without changing the centre view. */
+  const loadFile = useCallback(
+    async (path: string) => {
       if (currentPath.current === path) return;
       currentPath.current = path;
       try {
@@ -45,6 +47,21 @@ export function Workspace({ repoId }: { repoId: number }) {
     },
     [repoId],
   );
+  const openFile = useCallback(
+    async (path: string, hl: Highlight | null = null) => {
+      setView({ kind: "code" });
+      setHighlight(hl);
+      await loadFile(path);
+    },
+    [loadFile],
+  );
+
+  /** Make `f` the thing under investigation, keeping the code viewer in step. */
+  function investigateTarget(f: Focus) {
+    setHighlight(null);
+    setFocus(f);
+    loadFile(f.path);
+  }
 
   useEffect(() => {
     Promise.all([api.getRepo(repoId), api.listFiles(repoId)])
@@ -58,7 +75,15 @@ export function Workspace({ repoId }: { repoId: number }) {
   }, [repoId, openFile]);
 
   function openEvidence(e: Evidence) {
-    if (e.source_type === "commit" && e.metadata.sha) {
+    if (e.source_type === "graph" && e.path) {
+      investigateTarget(
+        e.metadata.node_kind === "symbol" && e.start_line
+          ? { path: e.path, start_line: e.start_line, end_line: e.end_line ?? e.start_line, label: e.symbol_name ?? undefined }
+          : { path: e.path, label: e.path.split("/").pop() },
+      );
+      setRelMode("impact");
+      setView({ kind: "relations" });
+    } else if (e.source_type === "commit" && e.metadata.sha) {
       setView({ kind: "commit", sha: String(e.metadata.sha), path: e.path });
     } else if (e.source_type === "pull_request" || e.source_type === "issue") {
       setView({ kind: "record", evidence: e });
@@ -155,6 +180,14 @@ export function Workspace({ repoId }: { repoId: number }) {
               Code
             </Tab>
             <Tab
+              active={view.kind === "relations"}
+              onClick={() => setView({ kind: "relations" })}
+              icon={Network}
+              disabled={!historyTarget}
+            >
+              Relations
+            </Tab>
+            <Tab
               active={view.kind === "history"}
               onClick={() => setView({ kind: "history" })}
               icon={History}
@@ -180,6 +213,18 @@ export function Workspace({ repoId }: { repoId: number }) {
                   setHighlight(null);
                   setFocus(f);
                 }}
+              />
+            ) : view.kind === "relations" && historyTarget ? (
+              <RelationsPanel
+                repoId={repoId}
+                target={historyTarget}
+                mode={relMode}
+                onMode={setRelMode}
+                onFocus={investigateTarget}
+                onOpenCode={(path, start, end) =>
+                  openFile(path, start ? { start, end: end ?? start, tone: "evidence" } : null)
+                }
+                onOpenCommit={(sha, path) => setView({ kind: "commit", sha, path })}
               />
             ) : view.kind === "history" && historyTarget ? (
               <TimelinePanel

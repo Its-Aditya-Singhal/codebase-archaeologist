@@ -47,6 +47,8 @@ def indexed_sources(stats: dict) -> list[str]:
         sources.append("pull requests")
     if history.get("issues"):
         sources.append("issues")
+    if (stats.get("graph") or {}).get("edges"):
+        sources.append("dependency graph")
     return sources
 
 

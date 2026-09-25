@@ -18,12 +18,13 @@ cited answer out.
                                 │    ├── answering/   evidence → Claude → streamed, cited answer     │
                                 │    ├── embeddings/  Embedder protocol (local fastembed default)    │
                                 │    ├── history/     git log/-L, GitHub PRs+issues, links, provenance│
-                                │    └── (phase 3) graph/                                            │
+                                │    └── graph/       extract → resolve → build; neighbourhood, impact│
                                 └───────────────────────────────┬────────────────────────────────────┘
                                                                 │
                                                    PostgreSQL 17 + pgvector
                      repositories · files · chunks (vector + tsvector)
                      commits · commit_files · pull_requests · issues · links
+                     graph_nodes · graph_edges
 ```
 
 Module boundaries (each can evolve independently):
@@ -31,8 +32,9 @@ Module boundaries (each can evolve independently):
 | Module | Owns | Depends on |
 |---|---|---|
 | `ingestion` | turning a repo into `files` + `chunks` | embeddings, db |
-| `retrieval` | ranking evidence for a question (+ optional focus) | embeddings, db, history |
+| `retrieval` | ranking evidence for a question (+ optional focus) | embeddings, db, history, graph |
 | `history` | commits, PRs, issues, links; line provenance | db, GitHub API, git |
+| `graph` | entities + typed edges over code and history; traversal, impact | db, history (provenance) |
 | `answering` | prompt contract, Claude call, streaming | retrieval output only |
 | `embeddings` | the `Embedder` protocol | — |
 | frontend | investigation UX | HTTP API only |
@@ -86,19 +88,50 @@ Deferred to later phases: PR review comments and issue comment threads (one requ
 item, costly without a token), cross-file code movement (`git log -L` stays within a file;
 phase 3's symbol graph can follow moves), incremental re-indexing.
 
-## Phase 3: knowledge graph / relationship layer
+## Phase 3: knowledge graph / relationship layer ✅
 
 Goal: *what is related* and *what breaks if I change this*.
 
-1. `entities` (repo, file, symbol, commit, PR, issue, author, external dependency) and typed
-   `edges` (`defines`, `calls`, `imports`, `modifies`, `introduced_by`, `fixes`, `authored`,
-   `depends_on`) in Postgres. Recursive CTEs are enough to start; move to a graph DB only if
-   traversal performance demands it.
-2. Extraction: tree-sitter import/call extraction (per-language queries), manifest parsing
-   (`package.json`, `pyproject.toml`, `go.mod`, …) for dependencies, phase-2 links for history.
-3. Graph-augmented retrieval: expand from focus/top hits along edges (1–2 hops) and fuse with
-   the text retrievers; replaces phase 1's lexical "reference" heuristic.
-4. Impact analysis endpoint: reverse `calls`/`imports` closure plus co-change frequency from history.
+- **One graph over code and history** (`graph_nodes` / `graph_edges`). Nodes: file, symbol,
+  module (external import), dependency (declared in a manifest), commit, pull request, issue,
+  author. Edges: `defines`, `contains`, `calls`, `inherits`, `imports`, `declares`, `modifies`,
+  `authored`, `merged_in`, `part_of`, `fixes`, `mentions`, so the chain
+  issue → PR → commit → file → function → dependency is a path in one table.
+- **Extraction** (`graph/extract.py`): one tree-sitter walk per file, driven by per-language
+  tables, yields imports, call sites (name + receiver) and base classes for Python, JS/TS/TSX
+  (incl. JSX component usage, `require`), Go, Rust, Java, Kotlin, C#, PHP, Ruby, C/C++.
+  Symbols are *definitions* (`chunker.definitions`), independent of retrieval chunking, so
+  methods of small classes are nodes too; each points at the chunk that holds it.
+- **Resolution** (`graph/resolve.py`, `graph/build.py`): imports → repository files by each
+  language's module rules (Python packages + relative imports + source roots, TS/JS relative
+  and `@/` aliases + index files, Go modules from `go.mod`, Java/Kotlin/PHP paths, Rust
+  `crate::`, Ruby `require_relative`, C includes), else an external package, matched to
+  manifest dependencies (`package.json`, `pyproject.toml`, `requirements*.txt`, `setup.py`,
+  `go.mod`, `Cargo.toml`, `Gemfile`). Calls resolve by scope: explicit import (following
+  package re-exports) → `self`/`this` within the class → inherited methods → same file /
+  class / package → module alias (`utils.f()`) → class-qualified (`Queue.create()`) →
+  receiver named after a class (`queue.enqueue()` → `Queue.enqueue`) → a unique definition.
+  Each edge records `via` and a confidence (1.0 for explicit scope, 0.4 for a name-only match).
+  On rq: 5,866 call sites to repository names, 79% resolved; the build takes under a second.
+- **Graph-augmented retrieval**: the code under investigation (focus, or the symbol the
+  question names) pulls in its callers, callees, bases and subclasses, production code first,
+  each labelled with its relation (`relation="calls Queue.enqueue_call"`) for the model. The
+  lexical "reference" search remains as the fallback when the graph has nothing.
+- **Impact analysis** (`GET /impact`): reverse closure over calls/inheritance (and imports for
+  files) to 3 hops with path confidence, tests reached, co-change from history (files that
+  change in the same commits, ignoring sweeping commits), churn, and a transparent risk
+  heuristic where every point carries its reason. "What would break" questions get it as a
+  `type="graph"` evidence source.
+- **UI**: a Relations tab with a layered neighbourhood graph (callers two hops ← target →
+  callees, bases, packages used; the provenance lane issue → PR → commit underneath; click to
+  re-centre, ↗ to open code, dashed = inferred) and an Impact view (risk, blast-radius rings,
+  dependents, tests, co-change). Caller counts appear in the code viewer's symbol bar.
+
+Known gaps: name-based resolution cannot see dynamic dispatch, callbacks passed as values,
+reflection or string-based lookups, and a variable receiver not named after its type
+(`q.enqueue()`) resolves only when the method name is unique. Type inference (e.g. via a
+language server or stack-graphs) would raise precision. Symbol-level `modifies` edges are
+computed on demand with `git log -L` rather than stored.
 
 ## Phase 4: investigation experience
 

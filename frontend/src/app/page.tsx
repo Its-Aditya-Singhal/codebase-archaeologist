@@ -163,6 +163,7 @@ function RepoRow({ repo, onChange }: { repo: Repo; onChange: () => void }) {
             {repo.stats.history?.commits
               ? ` · ${repo.stats.history.commits} commits · ${repo.stats.history.pull_requests ?? 0} PRs`
               : ""}
+            {repo.stats.graph?.edge_kinds?.calls ? ` · ${repo.stats.graph.edge_kinds.calls} call links` : ""}
             {langs.length ? " · " + langs.map(([l]) => l).join(", ") : ""}
           </p>
         )}

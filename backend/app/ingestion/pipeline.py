@@ -1,4 +1,4 @@
-"""Repository ingestion: clone -> walk -> chunk -> embed -> store -> history."""
+"""Repository ingestion: clone -> walk -> chunk -> embed -> store -> history -> graph."""
 
 import logging
 import traceback
@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 
 from app.config import get_settings
 from app.db import connection
+from app.graph.build import rebuild_graph
 from app.history.ingest import ingest_history
 from app.ingestion.chunker import Chunk, chunk_file, detect_language
 from app.ingestion.filters import decode_text, should_index_path
@@ -140,6 +141,16 @@ def ingest_repository(repo_id: int) -> None:
         except Exception as exc:
             log.error("History ingestion failed for repo %s\n%s", repo_id, traceback.format_exc())
             stats["history"] = {"error": str(exc)[:500]}
+
+        # The graph links code and history, so it is built last. Like history, a
+        # failure leaves search and answers working.
+        _set_status(repo_id, "graph", progress={"step": "Building the knowledge graph"})
+        try:
+            stats["graph"] = rebuild_graph(repo_id, lambda step: _set_status(
+                repo_id, "graph", progress={"step": step}))
+        except Exception as exc:
+            log.error("Graph build failed for repo %s\n%s", repo_id, traceback.format_exc())
+            stats["graph"] = {"error": str(exc)[:500]}
 
         with connection() as conn:
             conn.execute(

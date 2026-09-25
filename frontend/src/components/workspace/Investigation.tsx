@@ -242,6 +242,9 @@ function evidenceTitle(e: Evidence): { primary: string; secondary: string } {
       secondary: `${String(m.sha ?? "").slice(0, 10)} · ${m.author} · ${formatDate(m.date as string)}`,
     };
   }
+  if (e.source_type === "graph") {
+    return { primary: `Impact of ${e.symbol_name}`, secondary: `dependency graph · ${e.path}` };
+  }
   if (e.source_type === "pull_request" || e.source_type === "issue") {
     return {
       primary: `#${m.number} ${m.title ?? ""}`,
@@ -268,6 +271,7 @@ function EvidenceRow({
   const { primary, secondary } = evidenceTitle(e);
   const Icon = (TYPE_ICON as Record<string, LucideIcon | undefined>)[e.source_type];
   const role = e.metadata?.role as string | undefined;
+  const relation = e.metadata?.graph as string | undefined;
   return (
     <button
       onClick={onOpen}
@@ -290,7 +294,10 @@ function EvidenceRow({
             <span className="shrink-0 rounded bg-lamp-soft px-1 font-mono text-[9px] text-lamp">origin</span>
           ) : null}
         </span>
-        <span className="block truncate font-mono text-[10px] text-faint">{secondary}</span>
+        <span className="block truncate font-mono text-[10px] text-faint" title={relation}>
+          {relation ? <span className="text-lamp/80">{relation.split(" (")[0]} · </span> : null}
+          {secondary}
+        </span>
       </span>
       <span className="shrink-0 font-mono text-[9px] text-faint">{e.matched_by.join(" ")}</span>
     </button>

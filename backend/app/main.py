@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from app.answering.answer import indexed_sources, stream_answer
 from app.config import get_settings
 from app.db import close_db, connection, init_db
+from app.graph.build import rebuild_graph
+from app.graph.query import impact, neighborhood
 from app.history.timeline import commit_detail, timeline
 from app.ingestion.pipeline import ingest_repository
 from app.ingestion.repo_source import RepoSourceError, parse_repo_ref
@@ -22,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # Ingestion is CPU/IO heavy and long-running; keep it off the request threads.
 _ingest_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ingest")
 
-IN_PROGRESS = ("queued", "cloning", "parsing", "embedding", "history")
+IN_PROGRESS = ("queued", "cloning", "parsing", "embedding", "history", "graph")
 
 
 @asynccontextmanager
@@ -148,10 +150,23 @@ def get_file(repo_id: int, path: str = Query(...)):
             "WHERE repo_id = %s AND path = %s", (repo_id, path)).fetchone()
         if f is None:
             raise HTTPException(404, "File not indexed")
+        # Graph symbols are per definition (methods of small classes included) and
+        # carry call degree; chunk symbols are the fallback (docs, no graph yet).
         symbols = conn.execute(
-            """SELECT id, symbol_kind AS kind, symbol_name AS name, start_line, end_line
-               FROM chunks WHERE file_id = %s AND symbol_name IS NOT NULL
-               ORDER BY start_line, end_line DESC""", (f["id"],)).fetchall()
+            """SELECT n.id, n.data->>'kind' AS kind, n.label AS name, n.start_line, n.end_line,
+                      count(e.src) FILTER (WHERE e.dst = n.id) AS callers,
+                      count(e.dst) FILTER (WHERE e.src = n.id) AS callees
+               FROM graph_nodes n
+               LEFT JOIN graph_edges e ON (e.dst = n.id OR e.src = n.id) AND e.kind = 'calls'
+               WHERE n.repo_id = %s AND n.kind = 'symbol' AND n.path = %s
+               GROUP BY n.id ORDER BY n.start_line, n.end_line DESC""",
+            (repo_id, path)).fetchall()
+        if not symbols:
+            symbols = conn.execute(
+                """SELECT DISTINCT ON (symbol_name, start_line) id, symbol_kind AS kind,
+                          symbol_name AS name, start_line, end_line
+                   FROM chunks WHERE file_id = %s AND symbol_name IS NOT NULL
+                   ORDER BY start_line, symbol_name, end_line DESC""", (f["id"],)).fetchall()
     return {**f, "symbols": symbols}
 
 
@@ -176,6 +191,59 @@ def get_commit(repo_id: int, sha: str, path: str | None = None):
     if detail is None:
         raise HTTPException(404, "Commit not found")
     return detail
+
+
+# ------------------------------------------------------------------------- graph
+
+
+@app.get("/api/repos/{repo_id}/graph")
+def get_graph(repo_id: int, path: str = Query(...), start_line: int | None = None,
+              end_line: int | None = None, history: bool = True):
+    """The knowledge-graph neighbourhood of a symbol (selected lines) or file:
+    callers and callees two hops out, base classes, imports, dependencies used,
+    and the issue -> PR -> commit chain behind it."""
+    repo = _repo_with_graph(repo_id)
+    result = neighborhood(repo, path, start_line, end_line, history=history)
+    if result is None:
+        raise HTTPException(404, "Nothing in the graph at that location")
+    return result
+
+
+@app.get("/api/repos/{repo_id}/impact")
+def get_impact(repo_id: int, path: str = Query(...), start_line: int | None = None,
+               end_line: int | None = None):
+    """What could break if this code changes: everything that reaches it through
+    calls, inheritance or imports (3 hops), the tests among them, files that
+    change in the same commits, and a heuristic risk level with its reasons."""
+    repo = _repo_with_graph(repo_id)
+    result = impact(repo, path, start_line, end_line)
+    if result is None:
+        raise HTTPException(404, "Nothing in the graph at that location")
+    return result
+
+
+@app.post("/api/repos/{repo_id}/graph/rebuild")
+def rebuild_repo_graph(repo_id: int):
+    """Rebuild only the graph from the stored index (no clone, parse or embed)."""
+    repo = _get_repo(repo_id)
+    if repo["status"] != "ready":
+        raise HTTPException(409, f"Repository is not ready (status: {repo['status']})")
+    stats = rebuild_graph(repo_id)
+    with connection() as conn:
+        conn.execute("UPDATE repositories SET stats = stats || jsonb_build_object("
+                     "'graph', %s::jsonb) WHERE id = %s", (json.dumps(stats), repo_id))
+    return _get_repo(repo_id)
+
+
+def _repo_with_graph(repo_id: int) -> dict:
+    repo = _repo_with_checkout(repo_id)
+    with connection() as conn:
+        built = conn.execute("SELECT 1 FROM graph_nodes WHERE repo_id = %s LIMIT 1",
+                             (repo_id,)).fetchone()
+    if built is None:
+        raise HTTPException(409, "The knowledge graph has not been built for this repository "
+                                 "yet; re-index it or rebuild the graph.")
+    return repo
 
 
 def _repo_with_checkout(repo_id: int) -> dict:

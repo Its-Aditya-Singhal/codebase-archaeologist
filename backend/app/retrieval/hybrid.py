@@ -8,15 +8,20 @@ reliable on code, so both run and ranks are fused.
 function the user selected). Chunks overlapping the focus are always included
 first, and other chunks from the same file get a boost.
 
-Provenance: for the code under investigation (the focus, or else the symbol the
-question names) the commits that changed it, their pull requests and the issues
-behind them are pinned right after it. See app/history/provenance.py.
+Graph: the code under investigation (the focus, or else the symbol the question
+names) pulls in its callers, callees and base classes from the knowledge graph,
+and questions about change impact get the graph's impact analysis as evidence.
+
+Provenance: for the same code, the commits that changed it, their pull requests
+and the issues behind them are pinned right after it. See app/history/provenance.py.
 """
 
+import re
 from dataclasses import asdict, dataclass, field
 
 from app.db import connection
 from app.embeddings import get_embedder
+from app.graph.query import describe_impact, related_code
 from app.history.provenance import (
     ProvenanceItem,
     file_provenance,
@@ -27,6 +32,12 @@ from app.text import query_identifiers, query_terms
 
 RRF_K = 60
 CANDIDATES = 50
+IMPACT_QUESTION = re.compile(
+    r"\b(break|breaks|breaking|impact|affect\w*|depend\w*|dependents|callers?|who (uses|calls)"
+    r"|where\b.*\bused|usages?|refactor\w*|safe to|risk\w*|blast radius"
+    r"|(if|when) (i|we|you|someone) (change|modify|remove|delete|rename)\w*)\b", re.IGNORECASE)
+RELATION_TEXT = {"caller": "calls {}", "callee": "called by {}", "base": "base class of {}",
+                 "subclass": "subclass of {}"}
 
 
 @dataclass
@@ -131,20 +142,6 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
                 (repo_id, idents, idents, idents),
             ).fetchall(), "symbol", weight=2.0)
 
-        # 5. References: other chunks that mention the focused symbol (call sites,
-        # docs, tests). A lexical stand-in until the graph layer has real edges.
-        for sym in focus_symbols[:1]:
-            short = sym.replace("::", ".").rsplit(".", 1)[-1]
-            ref_terms = query_terms(short)
-            if len(short) < 3 or not ref_terms:
-                continue
-            add(conn.execute(
-                f"""SELECT {_COLUMNS} FROM chunks, phraseto_tsquery('simple', %s) q
-                    WHERE repo_id = %s AND tsv @@ q AND NOT (id = ANY(%s))
-                    ORDER BY ts_rank_cd(tsv, q) DESC LIMIT 15""",
-                (short, repo_id, pinned),
-            ).fetchall(), "reference", weight=1.5)
-
         if focus is not None:
             for cid, row in rows_by_id.items():
                 if row["path"] == focus.path and cid not in pinned:
@@ -154,15 +151,42 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
         repo = conn.execute("SELECT local_path, head_sha FROM repositories WHERE id = %s",
                             (repo_id,)).fetchone()
 
-    # 6. Provenance of the code under investigation.
+    # 5. Graph neighbours of the code under investigation: what calls it, what it
+    # calls, its base classes. Falls back to a lexical search for mentions of the
+    # symbol when the graph has nothing (unsupported language, no graph yet).
+    anchor = _code_anchor(focus_rows, rows_by_id, matched, scores)
+    graph_target = None
+    if anchor is not None:
+        graph_target, related = related_code(repo_id, anchor["path"], anchor["start_line"],
+                                             anchor["end_line"])
+        if related:
+            _add_graph_neighbours(related, graph_target, pinned, add, rows_by_id, matched)
+        elif focus_symbols:
+            _add_references(repo_id, focus_symbols[0], pinned, add)
+
+    # 6. Impact analysis for "what would break / who uses this" questions.
+    impact_chunk = None
+    if graph_target is not None and IMPACT_QUESTION.search(question):
+        text = describe_impact({"id": repo_id}, graph_target["path"],
+                               graph_target["start_line"] if graph_target["kind"] == "symbol"
+                               else None, graph_target["end_line"])
+        if text:
+            impact_chunk = RetrievedChunk(
+                id=-graph_target["id"], source_type="graph", path=graph_target["path"],
+                language=None, symbol_kind="impact", symbol_name=graph_target["label"],
+                start_line=graph_target["start_line"], end_line=graph_target["end_line"],
+                content=text, score=1.0, matched_by=["graph", "impact"],
+                metadata={"node_kind": graph_target["kind"]})
+
+    # 7. Provenance of the code under investigation.
     history_items: list[ProvenanceItem] = []
     if history and repo and repo["local_path"] and repo["head_sha"]:
-        anchor = _provenance_anchor(focus, rows_by_id, matched, scores)
-        if anchor and anchor[1] is not None:
+        where = _provenance_anchor(focus, anchor)
+        if where and where[1] is not None:
             history_items = range_provenance(repo_id, repo["local_path"], repo["head_sha"],
-                                             anchor[0], anchor[1], anchor[2])
-        elif anchor:
-            history_items = file_provenance(repo_id, repo["local_path"], anchor[0])
+                                             where[0], where[1], where[2])
+        elif where:
+            history_items = file_provenance(repo_id, repo["local_path"], where[0])
     history_ids = {h.id for h in history_items}
 
     results: list[RetrievedChunk] = [
@@ -184,7 +208,59 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
                                       matched_by=matched[cid]))
         if len(results) >= budget:
             break
+    if impact_chunk is not None:
+        results.insert(len(pinned), impact_chunk)
     return _expand_history_hits(repo_id, results)
+
+
+def _code_anchor(focus_rows: list[dict], rows_by_id: dict, matched: dict, scores: dict
+                 ) -> dict | None:
+    """The code the question is about: the selection, else the best-scoring code
+    chunk the question names by symbol."""
+    if focus_rows:
+        return focus_rows[0]
+    named = [cid for cid, labels in matched.items()
+             if "symbol" in labels and rows_by_id[cid]["source_type"] == "code"]
+    if not named:
+        return None
+    return rows_by_id[max(named, key=lambda cid: scores.get(cid, 0.0))]
+
+
+def _add_graph_neighbours(related: list[dict], target: dict, pinned: list[int], add,
+                          rows_by_id: dict, matched: dict) -> None:
+    ids = [r["chunk_id"] for r in related if r["chunk_id"] not in pinned]
+    if not ids:
+        return
+    with connection() as conn:
+        rows = {r["id"]: r for r in conn.execute(
+            f"SELECT {_COLUMNS} FROM chunks WHERE id = ANY(%s)", (ids,)).fetchall()}
+    # Several methods of one small class share its chunk; the first relation wins.
+    firsts = {}
+    for r in related:
+        if r["chunk_id"] in rows:
+            firsts.setdefault(r["chunk_id"], r)
+    add([rows[cid] for cid in firsts], "graph", weight=1.5)
+    for cid, r in firsts.items():
+        text = RELATION_TEXT[r["relation"]].format(target["label"])
+        if r["confidence"] < 0.9:
+            text += f" (inferred by name, confidence {r['confidence']:.1f})"
+        row = rows_by_id[cid]
+        row["metadata"] = {**(row["metadata"] or {}), "graph": text}
+        matched[cid].append(r["relation"])
+
+
+def _add_references(repo_id: int, symbol: str, pinned: list[int], add) -> None:
+    """Chunks that mention the symbol by name (call sites, docs, tests)."""
+    short = symbol.replace("::", ".").rsplit(".", 1)[-1]
+    if len(short) < 3 or not query_terms(short):
+        return
+    with connection() as conn:
+        add(conn.execute(
+            f"""SELECT {_COLUMNS} FROM chunks, phraseto_tsquery('simple', %s) q
+                WHERE repo_id = %s AND tsv @@ q AND NOT (id = ANY(%s))
+                ORDER BY ts_rank_cd(tsv, q) DESC LIMIT 15""",
+            (short, repo_id, pinned),
+        ).fetchall(), "reference", weight=1.5)
 
 
 def _expand_history_hits(repo_id: int, results: list[RetrievedChunk], max_added: int = 4
@@ -219,18 +295,15 @@ def _expand_history_hits(repo_id: int, results: list[RetrievedChunk], max_added:
     return out
 
 
-def _provenance_anchor(focus: Focus | None, rows_by_id: dict, matched: dict, scores: dict
+def _provenance_anchor(focus: Focus | None, anchor: dict | None
                        ) -> tuple[str, int | None, int | None] | None:
-    """The code whose history to pull: the user's selection, else the
-    best-scoring code chunk the question names by symbol."""
+    """The code whose history to pull: the user's selection (a range or a whole
+    file), else the code the question names."""
     if focus is not None:
         return focus.path, focus.start_line, focus.end_line or focus.start_line
-    named = [cid for cid, labels in matched.items()
-             if "symbol" in labels and rows_by_id[cid]["source_type"] == "code"]
-    if not named:
+    if anchor is None:
         return None
-    best = rows_by_id[max(named, key=lambda cid: scores.get(cid, 0.0))]
-    return best["path"], best["start_line"], best["end_line"]
+    return anchor["path"], anchor["start_line"], anchor["end_line"]
 
 
 def _overlaps_selected(row: dict, selected: list[RetrievedChunk]) -> bool:

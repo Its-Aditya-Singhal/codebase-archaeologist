@@ -63,7 +63,7 @@ DEFINITION_TYPES: dict[str, dict[str, str]] = {
         "struct_specifier": "struct",
         "namespace_definition": "namespace",
     },
-    "c_sharp": {
+    "csharp": {
         "class_declaration": "class",
         "interface_declaration": "interface",
         "struct_declaration": "struct",
@@ -264,6 +264,54 @@ def _chunk_code(text: str, lines: list[str], language: str) -> list[Chunk]:
 
     chunks.sort(key=lambda c: (c.start_line, -c.end_line))
     return chunks
+
+
+# ---------------------------------------------------------------- definitions
+
+# Definitions whose bodies hold further definitions worth naming (methods).
+CONTAINER_KINDS = {"class", "impl", "trait", "interface", "struct", "module", "namespace",
+                   "enum", "protocol"}
+
+
+@dataclass
+class Definition:
+    kind: str
+    name: str  # qualified: Queue.enqueue_call
+    parent: str | None
+    start_line: int
+    end_line: int
+
+
+def definitions(text: str, language: str | None) -> list[Definition]:
+    """Every named definition in a file, classes and their members included,
+    regardless of how the file is chunked for retrieval (a small class is one
+    chunk, but its methods are still separate definitions)."""
+    if language not in DEFINITION_TYPES:
+        return []
+    source = text.encode("utf-8")
+    try:
+        tree = _parser(language).parse(source)
+    except Exception:
+        return []
+    out: list[Definition] = []
+
+    def visit(node, kind, name, defn, parent: str | None, depth: int) -> None:
+        if not name:
+            return
+        if parent and kind == "function":
+            kind = "method"
+        qualified = f"{parent}.{name}" if parent else name
+        out.append(Definition(kind, qualified, parent, node.start_point[0] + 1,
+                              node.end_point[0] + 1))
+        if kind in CONTAINER_KINDS and depth < 4:
+            for child in _body_children(defn):
+                if (found := _as_definition(child, language, source)) is not None:
+                    visit(*found, parent=qualified, depth=depth + 1)
+
+    for child in tree.root_node.named_children:
+        if (found := _as_definition(child, language, source)) is not None:
+            visit(*found, parent=None, depth=0)
+    return out
 
 
 # ----------------------------------------------------------------------- markdown

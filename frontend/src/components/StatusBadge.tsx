@@ -6,6 +6,7 @@ const STYLES: Record<RepoStatus, string> = {
   parsing: "text-lamp border-lamp/40",
   embedding: "text-lamp border-lamp/40",
   history: "text-lamp border-lamp/40",
+  graph: "text-lamp border-lamp/40",
   ready: "text-evidence border-evidence/40",
   failed: "text-danger border-danger/40",
 };

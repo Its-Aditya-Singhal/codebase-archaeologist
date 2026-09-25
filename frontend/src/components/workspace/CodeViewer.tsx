@@ -11,7 +11,7 @@ export interface Highlight {
   tone: "focus" | "evidence";
 }
 
-const LANG_ALIASES: Record<string, string> = { c_sharp: "csharp", bash: "shellscript" };
+const LANG_ALIASES: Record<string, string> = { bash: "shellscript" };
 
 function shikiLang(language: string | null): string {
   const l = language ? (LANG_ALIASES[language] ?? language) : "text";
@@ -162,7 +162,9 @@ function SymbolBar({
           <button
             key={s.id}
             onClick={() => onPick(s)}
-            title={`${s.kind} ${s.name} · lines ${s.start_line}–${s.end_line}`}
+            title={`${s.kind} ${s.name} · lines ${s.start_line}–${s.end_line}${
+              s.callers || s.callees ? ` · ${s.callers ?? 0} callers, calls ${s.callees ?? 0}` : ""
+            }`}
             className={`shrink-0 rounded border px-2 py-0.5 font-mono text-[11px] transition ${
               active
                 ? "border-lamp/60 bg-lamp-soft text-lamp"
@@ -170,6 +172,11 @@ function SymbolBar({
             }`}
           >
             <span className="text-faint">{KIND_GLYPH[s.kind] ?? "·"}</span> {s.name}
+            {s.callers ? (
+              <span className="ml-1.5 text-[9.5px] text-lamp/70" title={`${s.callers} callers in the dependency graph`}>
+                ←{s.callers}
+              </span>
+            ) : null}
           </button>
         );
       })}

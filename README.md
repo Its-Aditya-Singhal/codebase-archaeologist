@@ -4,9 +4,9 @@ An investigation tool that explains software repositories: what the code does, *
 where it came from, and how it evolved**. It answers from evidence retrieved from the repository
 and cites every source, so the developer can check it.
 
-> Status: **Phase 1** (ingestion + RAG) and **Phase 2** (Git / PR / issue intelligence) are
-> working. See [docs/ROADMAP.md](docs/ROADMAP.md) for the architecture and the plan for phase 3
-> (knowledge graph) and phase 4 (interactive investigation UI).
+> Status: **Phase 1** (ingestion + RAG), **Phase 2** (Git / PR / issue intelligence) and
+> **Phase 3** (knowledge graph) are working. See [docs/ROADMAP.md](docs/ROADMAP.md) for the
+> architecture and the plan for phase 4 (interactive investigation experience).
 
 ## What works today
 
@@ -21,6 +21,15 @@ and cites every source, so the developer can check it.
   selected code, line history traces the commit that introduced it and later changes, each
   with its diff, PR and the issues that PR fixed. All of it is evidence for *why / who / when*.
 - History tab: a timeline of every change to the selected code, plus commit and PR/issue views
+- Knowledge graph: files, functions, classes, packages, commits, PRs, issues and authors in one
+  graph, with calls, imports, inheritance and declared dependencies extracted from Python,
+  JS/TS, Go, Rust, Java, Kotlin, C#, PHP, Ruby and C/C++
+- Relations tab: who calls the selected code, what it calls, what it inherits and which
+  packages it uses (two hops), with the issue → PR → commit chain behind it. Click any node
+  to move the investigation there.
+- Impact analysis: everything that reaches the code (3 hops), the tests that exercise it,
+  files that historically change with it, and a change-risk verdict with its reasons. "What
+  would break if…" questions get this as cited evidence.
 - Streamed answers from Claude with inline `[S#]` citations; clicking one opens the source
   (code, commit, PR or issue)
 
@@ -30,7 +39,7 @@ and cites every source, so the developer can check it.
 |---|---|---|
 | Frontend | Next.js 16, React 19, TypeScript, Tailwind 4, Shiki | App Router workspace UI, fast syntax highlighting |
 | API | Python 3.13, FastAPI | Ingestion/parsing/ML ecosystem (tree-sitter, local embeddings) lives in Python |
-| Data | PostgreSQL 17 + pgvector (HNSW), `tsvector` | One store for relational data, vectors and full-text; graph edges fit here in phase 3 |
+| Data | PostgreSQL 17 + pgvector (HNSW), `tsvector` | One store for relational data, vectors, full-text and the graph (node/edge tables) |
 | Embeddings | `BAAI/bge-small-en-v1.5` via fastembed (local) | Indexing needs no API key; swappable behind `Embedder` |
 | Answers | Claude Opus 5 via the Anthropic SDK | Long-context reasoning over code with strict citation discipline |
 
@@ -77,6 +86,9 @@ re-indexes (it resumes where it stopped). With a token it completes in one run.
 | `GET` | `/api/repos/{id}/files`, `/api/repos/{id}/file?path=` | explorer + file with symbols |
 | `GET` | `/api/repos/{id}/history?path=&start_line=&end_line=` | commits that changed a range/file, with PRs/issues |
 | `GET` | `/api/repos/{id}/commits/{sha}?path=` | commit details and diff |
+| `GET` | `/api/repos/{id}/graph?path=&start_line=&end_line=` | graph neighbourhood of a symbol/file + provenance chain |
+| `GET` | `/api/repos/{id}/impact?path=&start_line=&end_line=` | dependents, tests, co-change, risk |
+| `POST` | `/api/repos/{id}/graph/rebuild` | rebuild only the graph from the stored index |
 | `POST` | `/api/repos/{id}/search` `{question, focus?}` | ranked evidence only (no LLM) |
 | `POST` | `/api/repos/{id}/ask` `{question, focus?}` | SSE: `sources` → `delta`* → `done`/`error` |
 
@@ -96,14 +108,18 @@ backend/app/
   ingestion/   repo_source (clone), filters, chunker (tree-sitter), pipeline
   history/     git_log (log, -L, blame-style range history), github (resumable PR/issue sync),
                links, ingest, provenance (code -> commits -> PRs -> issues), timeline
-  retrieval/   hybrid (vector + lexical + symbol + focus/reference + provenance, RRF)
+  graph/       extract (tree-sitter imports/calls/bases), resolve (module systems), manifests,
+               build (graph over code + history), query (neighbourhood, impact, related code)
+  retrieval/   hybrid (vector + lexical + symbol + focus + graph + provenance, RRF)
   answering/   prompts (evidence contract), answer (Claude streaming)
   embeddings/  Embedder protocol + local fastembed
-  schema.sql   repositories · files · chunks · commits · pull_requests · issues · links
+  schema.sql   repositories · files · chunks · commits · pull_requests · issues · links ·
+               graph_nodes · graph_edges
 frontend/src/
   app/                  landing (sites) + /repos/[id] workspace
   components/workspace  FileExplorer · CodeViewer · Investigation
   components/history    TimelinePanel · CommitView/RecordView · Diff and PR/issue chips
+  components/graph      RelationsPanel · NeighborhoodGraph · ImpactView
   lib/api.ts            typed client + SSE reader
 docs/ROADMAP.md         architecture and phase plan
 ```

@@ -6,6 +6,7 @@ export type RepoStatus =
   | "parsing"
   | "embedding"
   | "history"
+  | "graph"
   | "ready"
   | "failed";
 
@@ -32,6 +33,14 @@ export interface Repo {
       error?: string;
       github?: { complete: boolean; note: string | null };
     };
+    graph?: {
+      nodes?: number;
+      edges?: number;
+      edge_kinds?: Record<string, number>;
+      call_sites?: number;
+      resolved_call_sites?: number;
+      error?: string;
+    };
   };
   error: string | null;
   created_at: string;
@@ -51,6 +60,8 @@ export interface SymbolInfo {
   name: string;
   start_line: number;
   end_line: number;
+  callers?: number;
+  callees?: number;
 }
 
 export interface FileDetail {
@@ -140,7 +151,82 @@ export interface CommitDetail {
   issues: IssueRef[];
 }
 
-export const IN_PROGRESS: RepoStatus[] = ["queued", "cloning", "parsing", "embedding", "history"];
+export type GraphNodeKind =
+  | "file"
+  | "symbol"
+  | "module"
+  | "dependency"
+  | "commit"
+  | "pull_request"
+  | "issue"
+  | "author";
+
+export interface GraphNode {
+  id: number;
+  kind: GraphNodeKind;
+  key: string; // path, "path::Qualified.name", commit sha, PR/issue number...
+  label: string;
+  path: string | null;
+  start_line: number | null;
+  end_line: number | null;
+  data: Record<string, string | number | boolean | null | undefined>;
+  side?: "target" | "in" | "out" | "history";
+  depth?: number;
+  relation?: string;
+  role?: string | null;
+}
+
+export interface GraphEdge {
+  src: number;
+  dst: number;
+  kind: string;
+  confidence: number;
+  weight: number;
+  via: string | null;
+}
+
+export interface Neighborhood {
+  target: GraphNode & { members: number };
+  container: GraphNode | null;
+  members: GraphNode[];
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  totals: Record<string, number>;
+}
+
+export interface Dependent extends GraphNode {
+  depth: number;
+  confidence: number;
+  edge: string;
+  through: string | null;
+  is_test: boolean;
+}
+
+export interface Impact {
+  target: GraphNode;
+  summary: { direct: number; transitive: number; files: number; tests: number; test_files: number };
+  risk: { level: "low" | "medium" | "high"; score: number; reasons: string[] };
+  dependents: Dependent[];
+  files: { path: string; symbols: number; depth: number; is_test: boolean }[];
+  co_changed: { path: string; together: number; ratio: number; is_test: boolean }[];
+  churn: { commits: number; authors: number; last_changed: string | null; file_commits: number };
+}
+
+export const IN_PROGRESS: RepoStatus[] = [
+  "queued",
+  "cloning",
+  "parsing",
+  "embedding",
+  "history",
+  "graph",
+];
+
+function locationQuery(focus: Focus): URLSearchParams {
+  const q = new URLSearchParams({ path: focus.path });
+  if (focus.start_line) q.set("start_line", String(focus.start_line));
+  if (focus.end_line) q.set("end_line", String(focus.end_line));
+  return q;
+}
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -171,12 +257,14 @@ export const api = {
     fetch(`${API_URL}/api/repos/${id}/file?path=${encodeURIComponent(path)}`).then(
       json<FileDetail>,
     ),
-  history: (id: number, focus: Focus) => {
-    const q = new URLSearchParams({ path: focus.path });
-    if (focus.start_line) q.set("start_line", String(focus.start_line));
-    if (focus.end_line) q.set("end_line", String(focus.end_line));
-    return fetch(`${API_URL}/api/repos/${id}/history?${q}`).then(json<Timeline>);
-  },
+  history: (id: number, focus: Focus) =>
+    fetch(`${API_URL}/api/repos/${id}/history?${locationQuery(focus)}`).then(json<Timeline>),
+  graph: (id: number, focus: Focus) =>
+    fetch(`${API_URL}/api/repos/${id}/graph?${locationQuery(focus)}`).then(json<Neighborhood>),
+  impact: (id: number, focus: Focus) =>
+    fetch(`${API_URL}/api/repos/${id}/impact?${locationQuery(focus)}`).then(json<Impact>),
+  rebuildGraph: (id: number) =>
+    fetch(`${API_URL}/api/repos/${id}/graph/rebuild`, { method: "POST" }).then(json<Repo>),
   commit: (id: number, sha: string, path?: string | null) =>
     fetch(
       `${API_URL}/api/repos/${id}/commits/${sha}${path ? `?path=${encodeURIComponent(path)}` : ""}`,
