@@ -1,6 +1,13 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-export type RepoStatus = "queued" | "cloning" | "parsing" | "embedding" | "ready" | "failed";
+export type RepoStatus =
+  | "queued"
+  | "cloning"
+  | "parsing"
+  | "embedding"
+  | "history"
+  | "ready"
+  | "failed";
 
 export interface Repo {
   id: number;
@@ -17,6 +24,14 @@ export interface Repo {
     symbols?: number;
     skipped_files?: number;
     languages?: Record<string, number>;
+    history?: {
+      commits?: number;
+      pull_requests?: number;
+      issues?: number;
+      links?: number;
+      error?: string;
+      github?: { complete: boolean; note: string | null };
+    };
   };
   error: string | null;
   created_at: string;
@@ -66,9 +81,66 @@ export interface Evidence {
   content: string;
   score: number;
   matched_by: string[];
+  metadata: Record<string, string | number | null>;
 }
 
-export const IN_PROGRESS: RepoStatus[] = ["queued", "cloning", "parsing", "embedding"];
+export interface PullRequestRef {
+  number: number;
+  title: string | null;
+  state: string | null;
+  url: string | null;
+  author?: string | null;
+  merged_at?: string | null;
+}
+
+export interface IssueRef {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  kind: string;
+}
+
+export interface TimelineCommit {
+  sha: string;
+  author: string;
+  email: string;
+  date: string;
+  subject: string;
+  diff: string | null;
+  role?: "introduced";
+  pull_requests: PullRequestRef[];
+  issues: IssueRef[];
+}
+
+export interface Timeline {
+  scope: "range" | "file";
+  path: string;
+  start_line: number | null;
+  end_line: number | null;
+  commits: TimelineCommit[];
+  authors: string[];
+}
+
+export interface CommitDetail {
+  sha: string;
+  parent_shas: string[];
+  author_name: string;
+  author_email: string;
+  authored_at: string;
+  subject: string;
+  body: string;
+  files_changed: number;
+  insertions: number;
+  deletions: number;
+  files: { path: string; insertions: number | null; deletions: number | null }[];
+  diff: string;
+  diff_path: string | null;
+  pull_requests: PullRequestRef[];
+  issues: IssueRef[];
+}
+
+export const IN_PROGRESS: RepoStatus[] = ["queued", "cloning", "parsing", "embedding", "history"];
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -99,6 +171,16 @@ export const api = {
     fetch(`${API_URL}/api/repos/${id}/file?path=${encodeURIComponent(path)}`).then(
       json<FileDetail>,
     ),
+  history: (id: number, focus: Focus) => {
+    const q = new URLSearchParams({ path: focus.path });
+    if (focus.start_line) q.set("start_line", String(focus.start_line));
+    if (focus.end_line) q.set("end_line", String(focus.end_line));
+    return fetch(`${API_URL}/api/repos/${id}/history?${q}`).then(json<Timeline>);
+  },
+  commit: (id: number, sha: string, path?: string | null) =>
+    fetch(
+      `${API_URL}/api/repos/${id}/commits/${sha}${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+    ).then(json<CommitDetail>),
 };
 
 export type AskEvent =

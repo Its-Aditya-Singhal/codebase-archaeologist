@@ -16,9 +16,18 @@ id, e.g. [S3] or [S2][S5]. Cite the specific source that supports the claim, not
 - If the evidence does not answer the question, say so directly and say what evidence would \
 be needed (for example, the commit or pull request that introduced the code). A clear \
 "the indexed sources don't show this" is more useful than a plausible guess.
-- "Why" questions often need history. When only code and docs are available, explain what the \
-code and docs reveal about intent (comments, naming, docs, configuration, how it is used) and \
-state that the historical rationale isn't available in the indexed sources.
+- "Why", "who", "when" and "how did this evolve" questions are answered from history evidence: \
+commits (with the diff of the code in question), the pull requests they were merged in, and the \
+issues those PRs fixed or referenced. A commit tagged role="introduced" is the earliest commit \
+that touched the code in question within its current file; role="modified" commits changed it \
+later. Line history does not follow code across files, so if the introducing commit looks like \
+a move, rename or bulk refactor, say the code likely predates it. Name authors, dates, commit \
+SHAs (short form) and PR/issue numbers when they matter to the answer.
+- Rationale stated in a PR description, issue or commit message is evidence; quote or \
+paraphrase it and cite it. If no history source explains the motivation, say so, and explain \
+what the code, docs and diffs do reveal about intent (comments, naming, configuration, usage).
+- When history evidence is missing entirely, say which history would answer the question \
+(e.g. the pull request that introduced the code) rather than guessing.
 - General programming knowledge is fine for explaining a concept (for example, what a Redis \
 TTL is), but never present it as a fact about this repository.
 - Refer to code by path and symbol name, e.g. `src/cache.py` `CacheClient.get`.
@@ -41,8 +50,9 @@ def format_evidence(chunks, repo_name: str, focus_desc: str | None, sources_avai
             attrs.append(f'path="{c.path}"')
         if c.start_line is not None:
             attrs.append(f'lines="{c.start_line}-{c.end_line}"')
-        if c.symbol_name:
+        if c.source_type in ("code", "doc") and c.symbol_name:
             attrs.append(f'symbol="{c.symbol_kind} {c.symbol_name}"')
+        attrs += _history_attrs(c.source_type, c.metadata or {})
         parts.append(f"<source {' '.join(attrs)}>\n{c.content}\n</source>")
     parts.append("</evidence>")
     if focus_desc:
@@ -51,3 +61,27 @@ def format_evidence(chunks, repo_name: str, focus_desc: str | None, sources_avai
             "</selection>"
         )
     return "\n".join(parts)
+
+
+def _attr(value) -> str:
+    return str(value).replace('"', "'")
+
+
+def _history_attrs(source_type: str, m: dict) -> list[str]:
+    if source_type == "commit":
+        out = [f'sha="{m.get("sha", "")[:10]}"', f'author="{_attr(m.get("author"))}"',
+               f'date="{(m.get("date") or "")[:10]}"']
+        if m.get("role"):
+            out.append(f'role="{m["role"]}"')
+        if m.get("pr"):
+            out.append(f'pull_request="#{m["pr"]}"')
+        return out
+    if source_type in ("pull_request", "issue"):
+        out = [f'number="#{m.get("number")}"', f'author="{_attr(m.get("author"))}"',
+               f'state="{m.get("state")}"', f'created="{(m.get("created_at") or "")[:10]}"']
+        if m.get("merged_at"):
+            out.append(f'merged="{m["merged_at"][:10]}"')
+        if m.get("relation"):
+            out.append(f'relation="{_attr(m["relation"])}"')
+        return out
+    return []

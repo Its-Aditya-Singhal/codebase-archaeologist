@@ -159,7 +159,10 @@ function RepoRow({ repo, onChange }: { repo: Repo; onChange: () => void }) {
           <p className="mt-1 line-clamp-2 text-xs text-danger">{repo.error}</p>
         ) : (
           <p className="mt-1 text-xs text-muted">
-            {repo.stats.files} files · {repo.stats.symbols} symbols · {repo.stats.chunks} chunks
+            {repo.stats.files} files · {repo.stats.symbols} symbols
+            {repo.stats.history?.commits
+              ? ` · ${repo.stats.history.commits} commits · ${repo.stats.history.pull_requests ?? 0} PRs`
+              : ""}
             {langs.length ? " · " + langs.map(([l]) => l).join(", ") : ""}
           </p>
         )}

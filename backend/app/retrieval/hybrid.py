@@ -7,12 +7,22 @@ reliable on code, so both run and ranks are fused.
 `focus` lets a caller pin the investigation to a file/line range (e.g. the
 function the user selected). Chunks overlapping the focus are always included
 first, and other chunks from the same file get a boost.
+
+Provenance: for the code under investigation (the focus, or else the symbol the
+question names) the commits that changed it, their pull requests and the issues
+behind them are pinned right after it. See app/history/provenance.py.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from app.db import connection
 from app.embeddings import get_embedder
+from app.history.provenance import (
+    ProvenanceItem,
+    file_provenance,
+    linked_records,
+    range_provenance,
+)
 from app.text import query_identifiers, query_terms
 
 RRF_K = 60
@@ -39,17 +49,18 @@ class RetrievedChunk:
     content: str
     score: float
     matched_by: list[str]
+    metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
 _COLUMNS = """id, source_type, path, language, symbol_kind, symbol_name,
-              start_line, end_line, content"""
+              start_line, end_line, content, metadata"""
 
 
-def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = None
-           ) -> list[RetrievedChunk]:
+def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = None,
+           history: bool = True) -> list[RetrievedChunk]:
     scores: dict[int, float] = {}
     matched: dict[int, list[str]] = {}
     rows_by_id: dict[int, dict] = {}
@@ -112,7 +123,7 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
         if idents:
             add(conn.execute(
                 f"""SELECT {_COLUMNS} FROM chunks
-                    WHERE repo_id = %s AND symbol_name IS NOT NULL
+                    WHERE repo_id = %s AND source_type = 'code' AND symbol_name IS NOT NULL
                       AND (lower(symbol_name) = ANY(%s)
                            OR lower(regexp_replace(symbol_name, '^.*[.:]', '')) = ANY(%s))
                     ORDER BY (lower(symbol_name) = ANY(%s)) DESC, (end_line - start_line) DESC
@@ -140,20 +151,86 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
                     scores[cid] = scores.get(cid, 0.0) * 1.5
                     matched[cid].append("same-file")
 
-    ranked = pinned + [
-        cid for cid, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-        if cid not in pinned
+        repo = conn.execute("SELECT local_path, head_sha FROM repositories WHERE id = %s",
+                            (repo_id,)).fetchone()
+
+    # 6. Provenance of the code under investigation.
+    history_items: list[ProvenanceItem] = []
+    if history and repo and repo["local_path"] and repo["head_sha"]:
+        anchor = _provenance_anchor(focus, rows_by_id, matched, scores)
+        if anchor and anchor[1] is not None:
+            history_items = range_provenance(repo_id, repo["local_path"], repo["head_sha"],
+                                             anchor[0], anchor[1], anchor[2])
+        elif anchor:
+            history_items = file_provenance(repo_id, repo["local_path"], anchor[0])
+    history_ids = {h.id for h in history_items}
+
+    results: list[RetrievedChunk] = [
+        RetrievedChunk(**rows_by_id[cid], score=1.0, matched_by=matched[cid]) for cid in pinned
     ]
-    results: list[RetrievedChunk] = []
+    for h in history_items:
+        role = h.metadata.get("role") or h.metadata.get("relation") or "history"
+        results.append(RetrievedChunk(**vars(h), score=1.0, matched_by=["history", role]))
+    ranked = [
+        cid for cid, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        if cid not in pinned and cid not in history_ids
+    ]
+    budget = limit + len(results)
     for cid in ranked:
         row = rows_by_id[cid]
         if _overlaps_selected(row, results):
             continue
         results.append(RetrievedChunk(**row, score=round(scores.get(cid, 1.0), 5),
                                       matched_by=matched[cid]))
-        if len(results) >= limit:
+        if len(results) >= budget:
             break
-    return results
+    return _expand_history_hits(repo_id, results)
+
+
+def _expand_history_hits(repo_id: int, results: list[RetrievedChunk], max_added: int = 4
+                         ) -> list[RetrievedChunk]:
+    """One hop along links for history hits found by search: a matching commit
+    brings its pull request, a matching PR brings the issues it fixes."""
+    present = {(r.source_type, r.symbol_name) for r in results}
+    wanted: list[tuple[int, str, str]] = []  # (result index, type, "#n")
+    for i, r in enumerate(results):
+        if "history" in r.matched_by:
+            continue  # provenance already expanded these
+        if r.source_type == "commit" and r.metadata.get("pr"):
+            wanted.append((i, "pull_request", f"#{r.metadata['pr']}"))
+        elif r.source_type == "pull_request":
+            wanted.append((i, "issue", r.symbol_name or ""))
+    wanted = [w for w in wanted if (w[1], w[2]) not in present]
+    if not wanted:
+        return results
+    records = linked_records(repo_id, wanted)
+    out: list[RetrievedChunk] = []
+    added = 0
+    for i, r in enumerate(results):
+        out.append(r)
+        for item in records.get(i, []):
+            key = (item.source_type, item.symbol_name)
+            if added >= max_added or key in present:
+                continue
+            present.add(key)
+            added += 1
+            out.append(RetrievedChunk(**vars(item), score=r.score,
+                                      matched_by=["linked", item.metadata.get("relation", "")]))
+    return out
+
+
+def _provenance_anchor(focus: Focus | None, rows_by_id: dict, matched: dict, scores: dict
+                       ) -> tuple[str, int | None, int | None] | None:
+    """The code whose history to pull: the user's selection, else the
+    best-scoring code chunk the question names by symbol."""
+    if focus is not None:
+        return focus.path, focus.start_line, focus.end_line or focus.start_line
+    named = [cid for cid, labels in matched.items()
+             if "symbol" in labels and rows_by_id[cid]["source_type"] == "code"]
+    if not named:
+        return None
+    best = rows_by_id[max(named, key=lambda cid: scores.get(cid, 0.0))]
+    return best["path"], best["start_line"], best["end_line"]
 
 
 def _overlaps_selected(row: dict, selected: list[RetrievedChunk]) -> bool:

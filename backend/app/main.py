@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
@@ -8,9 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.answering.answer import stream_answer
+from app.answering.answer import indexed_sources, stream_answer
 from app.config import get_settings
 from app.db import close_db, connection, init_db
+from app.history.timeline import commit_detail, timeline
 from app.ingestion.pipeline import ingest_repository
 from app.ingestion.repo_source import RepoSourceError, parse_repo_ref
 from app.retrieval.hybrid import Focus, search
@@ -20,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # Ingestion is CPU/IO heavy and long-running; keep it off the request threads.
 _ingest_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ingest")
 
-IN_PROGRESS = ("queued", "cloning", "parsing", "embedding")
+IN_PROGRESS = ("queued", "cloning", "parsing", "embedding", "history")
 
 
 @asynccontextmanager
@@ -153,6 +155,40 @@ def get_file(repo_id: int, path: str = Query(...)):
     return {**f, "symbols": symbols}
 
 
+# ----------------------------------------------------------------------- history
+
+
+@app.get("/api/repos/{repo_id}/history")
+def get_history(repo_id: int, path: str = Query(...), start_line: int | None = None,
+                end_line: int | None = None):
+    """Every commit that changed a line range (or file), newest first, with the
+    range diff and the pull requests / issues behind each commit."""
+    repo = _repo_with_checkout(repo_id)
+    return timeline(repo, path, start_line, end_line)
+
+
+@app.get("/api/repos/{repo_id}/commits/{sha}")
+def get_commit(repo_id: int, sha: str, path: str | None = None):
+    if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
+        raise HTTPException(422, "Expected a (short) hex commit SHA")
+    repo = _repo_with_checkout(repo_id)
+    detail = commit_detail(repo, sha, path)
+    if detail is None:
+        raise HTTPException(404, "Commit not found")
+    return detail
+
+
+def _repo_with_checkout(repo_id: int) -> dict:
+    with connection() as conn:
+        repo = conn.execute("SELECT id, local_path, head_sha FROM repositories WHERE id = %s",
+                            (repo_id,)).fetchone()
+    if repo is None:
+        raise HTTPException(404, "Repository not found")
+    if not repo["local_path"] or not repo["head_sha"]:
+        raise HTTPException(409, "Repository has not been indexed yet")
+    return repo
+
+
 # ------------------------------------------------------------------ investigation
 
 
@@ -192,7 +228,8 @@ def ask(repo_id: int, body: AskIn):
     def events():
         chunks = search(repo_id, body.question, body.limit, focus)
         yield _sse("sources", [dict(c.to_dict(), ref=f"S{i}") for i, c in enumerate(chunks, 1)])
-        for ev in stream_answer(body.question, repo["name"], chunks, focus):
+        for ev in stream_answer(body.question, repo["name"], chunks, focus,
+                                indexed_sources(repo["stats"])):
             yield _sse(ev["event"], ev["data"])
 
     return StreamingResponse(events(), media_type="text/event-stream",

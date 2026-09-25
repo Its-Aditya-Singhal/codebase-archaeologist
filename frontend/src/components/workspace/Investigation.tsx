@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AlertTriangle, ArrowUp, Crosshair, FileSearch, Square, X } from "lucide-react";
+import { AlertTriangle, ArrowUp, Crosshair, FileSearch, Square, X, type LucideIcon } from "lucide-react";
 import type { Evidence, Focus } from "@/lib/api";
+import { formatDate, TYPE_ICON } from "@/components/history/parts";
 
 export interface InvestigationRecord {
   id: string;
@@ -18,12 +19,13 @@ export interface InvestigationRecord {
 
 const SUGGESTIONS_FOCUSED = [
   "Why does this exist?",
-  "What does this do, step by step?",
+  "Who introduced this, and what problem did it solve?",
+  "How has this evolved over time?",
   "What calls this, and what would break if I changed it?",
 ];
 const SUGGESTIONS_GLOBAL = [
   "What are the main components of this codebase?",
-  "How does data flow from entry point to storage?",
+  "What were the most significant recent changes, and why?",
   "Where is configuration loaded?",
 ];
 
@@ -167,7 +169,7 @@ function Record({
 
       <div className="mt-3">
         {record.status === "retrieving" ? (
-          <p className="text-xs text-muted">Searching code and docs for evidence…</p>
+          <p className="text-xs text-muted">Searching code, docs and history for evidence…</p>
         ) : null}
         {record.answer ? (
           <div className={`answer text-parchment/90 ${record.status === "answering" ? "streaming-caret" : ""}`}>
@@ -183,7 +185,7 @@ function Record({
                       onClick={() => ev && onOpenEvidence(ev)}
                       onMouseEnter={() => setHovered(ref)}
                       onMouseLeave={() => setHovered(null)}
-                      title={ev ? `${ev.path}:${ev.start_line}-${ev.end_line}` : ref}
+                      title={ev ? evidenceTitle(ev).primary : ref}
                       className="mx-0.5 inline-flex -translate-y-px items-center rounded bg-evidence-soft px-1 font-mono text-[10px] leading-4 text-evidence hover:bg-evidence hover:text-ink-950"
                     >
                       {ref}
@@ -231,6 +233,27 @@ function Record({
   );
 }
 
+function evidenceTitle(e: Evidence): { primary: string; secondary: string } {
+  const m = e.metadata ?? {};
+  const firstLine = e.content.split("\n")[0];
+  if (e.source_type === "commit") {
+    return {
+      primary: firstLine,
+      secondary: `${String(m.sha ?? "").slice(0, 10)} · ${m.author} · ${formatDate(m.date as string)}`,
+    };
+  }
+  if (e.source_type === "pull_request" || e.source_type === "issue") {
+    return {
+      primary: `#${m.number} ${m.title ?? ""}`,
+      secondary: `${e.source_type === "issue" ? "issue" : "PR"} · ${m.state} · ${m.author}`,
+    };
+  }
+  return {
+    primary: `${e.symbol_name ?? e.path?.split("/").pop()}`,
+    secondary: `${e.path}:${e.start_line}–${e.end_line}`,
+  };
+}
+
 function EvidenceRow({
   evidence: e,
   cited,
@@ -242,6 +265,9 @@ function EvidenceRow({
   active: boolean;
   onOpen: () => void;
 }) {
+  const { primary, secondary } = evidenceTitle(e);
+  const Icon = (TYPE_ICON as Record<string, LucideIcon | undefined>)[e.source_type];
+  const role = e.metadata?.role as string | undefined;
   return (
     <button
       onClick={onOpen}
@@ -257,13 +283,14 @@ function EvidenceRow({
         {e.ref}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate font-mono text-[11px] text-parchment">
-          {e.symbol_name ?? e.path?.split("/").pop()}
-          <span className="text-faint"> · {e.source_type}</span>
+        <span className="flex items-center gap-1 truncate text-[11px] text-parchment">
+          {Icon ? <Icon className="size-3 shrink-0 text-lamp" /> : null}
+          <span className={`truncate ${Icon ? "" : "font-mono"}`}>{primary}</span>
+          {role === "introduced" ? (
+            <span className="shrink-0 rounded bg-lamp-soft px-1 font-mono text-[9px] text-lamp">origin</span>
+          ) : null}
         </span>
-        <span className="block truncate font-mono text-[10px] text-faint">
-          {e.path}:{e.start_line}–{e.end_line}
-        </span>
+        <span className="block truncate font-mono text-[10px] text-faint">{secondary}</span>
       </span>
       <span className="shrink-0 font-mono text-[9px] text-faint">{e.matched_by.join(" ")}</span>
     </button>

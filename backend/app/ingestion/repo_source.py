@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,7 +57,7 @@ def parse_repo_ref(raw: str) -> RepoRef:
     )
 
 
-def _git(args: list[str], cwd: Path | None = None, timeout: int = 900) -> str:
+def git(args: list[str], cwd: Path | None = None, timeout: int = 900, strip: bool = True) -> str:
     settings = get_settings()
     cmd = ["git"]
     if settings.github_token:
@@ -73,30 +74,41 @@ def _git(args: list[str], cwd: Path | None = None, timeout: int = 900) -> str:
     )
     if proc.returncode != 0:
         raise RepoSourceError(proc.stderr.strip() or f"git {' '.join(args)} failed")
-    return proc.stdout.strip()
+    # Callers parsing \x1e/\x1f-delimited output pass strip=False: Python treats
+    # those separators as whitespace.
+    return proc.stdout.strip() if strip else proc.stdout
 
 
 def sync_checkout(ref: RepoRef) -> None:
     """Clone (or fast-forward) the repository.
 
-    A blobless clone keeps the *full commit history* (needed for the git
-    intelligence phase) while only downloading file contents for HEAD.
+    A full clone: line-level history (`git log -L`, `git blame`) needs every
+    historical blob, and on a partial clone each one becomes a network fetch.
     """
     if ref.clone_url is None:
         return  # local checkout: index it as-is
+    if (ref.local_path / ".git").exists() and _is_partial_clone(ref.local_path):
+        shutil.rmtree(ref.local_path)  # from an earlier blobless clone; re-clone in full
     if (ref.local_path / ".git").exists():
-        _git(["fetch", "--prune", "origin"], cwd=ref.local_path)
-        branch = _git(["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=ref.local_path)
-        _git(["reset", "--hard", branch], cwd=ref.local_path)
+        git(["fetch", "--prune", "origin"], cwd=ref.local_path)
+        branch = git(["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=ref.local_path)
+        git(["reset", "--hard", branch], cwd=ref.local_path)
         return
     ref.local_path.parent.mkdir(parents=True, exist_ok=True)
-    _git(["clone", "--filter=blob:none", "--no-tags", ref.clone_url, str(ref.local_path)])
+    git(["clone", "--no-tags", ref.clone_url, str(ref.local_path)])
+
+
+def _is_partial_clone(path: Path) -> bool:
+    try:
+        return bool(git(["config", "--get", "remote.origin.partialclonefilter"], cwd=path))
+    except RepoSourceError:  # key not set
+        return False
 
 
 def head_info(path: Path) -> tuple[str, str]:
-    sha = _git(["rev-parse", "HEAD"], cwd=path)
+    sha = git(["rev-parse", "HEAD"], cwd=path)
     try:
-        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=path)
+        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=path)
     except RepoSourceError:
         branch = "HEAD"
     return sha, branch
@@ -104,7 +116,7 @@ def head_info(path: Path) -> tuple[str, str]:
 
 def tracked_files(path: Path) -> list[tuple[str, str]]:
     """(path, blob_sha) for every file tracked at HEAD."""
-    out = _git(["ls-files", "-s", "-z"], cwd=path)
+    out = git(["ls-files", "-s", "-z"], cwd=path)
     files = []
     for entry in out.split("\0"):
         if not entry:

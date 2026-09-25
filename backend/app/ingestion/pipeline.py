@@ -1,4 +1,4 @@
-"""Repository ingestion: clone -> walk -> chunk -> embed -> store."""
+"""Repository ingestion: clone -> walk -> chunk -> embed -> store -> history."""
 
 import logging
 import traceback
@@ -9,15 +9,15 @@ from psycopg.types.json import Jsonb
 
 from app.config import get_settings
 from app.db import connection
-from app.embeddings import get_embedder
+from app.history.ingest import ingest_history
 from app.ingestion.chunker import Chunk, chunk_file, detect_language
 from app.ingestion.filters import decode_text, should_index_path
 from app.ingestion.repo_source import head_info, parse_repo_ref, sync_checkout, tracked_files
-from app.text import expand_identifiers
+from app.ingestion.store import ChunkRow, delete_chunks, store_chunks
 
 log = logging.getLogger(__name__)
 
-EMBED_BATCH = 128
+CODE_TYPES = ("code", "doc")
 
 
 @dataclass
@@ -89,46 +89,35 @@ def ingest_repository(repo_id: int) -> None:
 
         total_chunks = sum(len(f.chunks) for f in parsed)
         _set_status(repo_id, "embedding", progress={
-            "step": "Embedding chunks", "done": 0, "total": total_chunks})
+            "step": "Embedding code and docs", "done": 0, "total": total_chunks})
 
-        with connection() as conn:
-            with conn.transaction():
-                conn.execute("DELETE FROM files WHERE repo_id = %s", (repo_id,))
-                conn.execute("DELETE FROM chunks WHERE repo_id = %s", (repo_id,))
-                file_ids: dict[str, int] = {}
-                for f in parsed:
-                    file_ids[f.path] = conn.execute(
-                        """INSERT INTO files (repo_id, path, language, size_bytes, line_count,
-                                              blob_sha, content)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                        (repo_id, f.path, f.language, len(f.content.encode()),
-                         f.content.count("\n") + 1, f.blob_sha, f.content),
-                    ).fetchone()["id"]
+        with connection() as conn, conn.transaction():
+            delete_chunks(repo_id, CODE_TYPES)
+            conn.execute("DELETE FROM files WHERE repo_id = %s", (repo_id,))
+            file_ids: dict[str, int] = {}
+            for f in parsed:
+                file_ids[f.path] = conn.execute(
+                    """INSERT INTO files (repo_id, path, language, size_bytes, line_count,
+                                          blob_sha, content)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (repo_id, f.path, f.language, len(f.content.encode()),
+                     f.content.count("\n") + 1, f.blob_sha, f.content),
+                ).fetchone()["id"]
 
-        embedder = get_embedder()
-        pending = [(f, c) for f in parsed for c in f.chunks]
-        for start in range(0, len(pending), EMBED_BATCH):
-            batch = pending[start : start + EMBED_BATCH]
-            vectors = embedder.embed_documents(
-                [embedding_text(f.path, f.language, c) for f, c in batch])
-            rows = [
-                (repo_id, c.source_type, file_ids[f.path], f.path, f.language, c.symbol_kind,
-                 c.symbol_name, c.start_line, c.end_line, c.content,
-                 expand_identifiers(f"{f.path}\n{c.symbol_name or ''}\n{c.content}"),
-                 Jsonb(c.metadata), vec)
-                for (f, c), vec in zip(batch, vectors, strict=True)
-            ]
-            with connection() as conn:
-                with conn.cursor() as cur:
-                    cur.executemany(
-                        """INSERT INTO chunks (repo_id, source_type, file_id, path, language,
-                               symbol_kind, symbol_name, start_line, end_line, content,
-                               search_text, metadata, embedding)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                        rows,
-                    )
-            _set_status(repo_id, "embedding", progress={
-                "step": "Embedding chunks", "done": start + len(batch), "total": total_chunks})
+        rows = [
+            ChunkRow(
+                source_type=c.source_type, content=c.content,
+                embed_text=embedding_text(f.path, f.language, c),
+                search_text=f"{f.path}\n{c.symbol_name or ''}\n{c.content}",
+                file_id=file_ids[f.path], path=f.path, language=f.language,
+                symbol_kind=c.symbol_kind, symbol_name=c.symbol_name,
+                start_line=c.start_line, end_line=c.end_line, metadata=c.metadata,
+            )
+            for f in parsed for c in f.chunks
+        ]
+        store_chunks(repo_id, rows, lambda done, total: _set_status(
+            repo_id, "embedding",
+            progress={"step": "Embedding code and docs", "done": done, "total": total}))
 
         languages = Counter(f.language or "other" for f in parsed)
         stats = {
@@ -138,6 +127,20 @@ def ingest_repository(repo_id: int) -> None:
             "symbols": sum(1 for f in parsed for c in f.chunks if c.symbol_name),
             "languages": dict(languages.most_common(12)),
         }
+
+        # History is best-effort: a GitHub outage or rate limit must not make
+        # the code index unusable.
+        _set_status(repo_id, "history", progress={"step": "Reading commit history"})
+        try:
+            stats["history"] = ingest_history(
+                repo_id, ref.local_path, ref.owner, ref.name,
+                lambda step, done, total: _set_status(repo_id, "history", progress={
+                    "step": step, "done": done, "total": total}),
+            )
+        except Exception as exc:
+            log.error("History ingestion failed for repo %s\n%s", repo_id, traceback.format_exc())
+            stats["history"] = {"error": str(exc)[:500]}
+
         with connection() as conn:
             conn.execute(
                 """UPDATE repositories SET status = 'ready', progress = '{}'::jsonb, stats = %s,

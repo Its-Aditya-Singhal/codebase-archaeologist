@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Ingestion limits.
     max_file_bytes: int = 400_000
     max_files: int = 20_000
+    max_commits: int = 20_000
+    # Pages of 100 per GitHub listing (pull requests, issues) per indexing run.
+    github_max_pages: int = 10
 
     cors_origins: list[str] = ["http://localhost:3000"]
 

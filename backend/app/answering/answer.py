@@ -12,9 +12,6 @@ from app.retrieval.hybrid import Focus, RetrievedChunk
 
 log = logging.getLogger(__name__)
 
-# Sources that exist in the index today. Later phases append commits / PRs / issues,
-# which also tells the model when "why" questions are answerable.
-INDEXED_SOURCES = ["code", "documentation"]
 
 NO_CREDENTIALS = (
     "Claude API credentials are missing or invalid. Set ANTHROPIC_API_KEY in backend/.env and "
@@ -30,7 +27,8 @@ def _client() -> anthropic.Anthropic:
 def describe_focus(focus: Focus | None, chunks: list[RetrievedChunk]) -> str | None:
     if focus is None:
         return None
-    pinned = next((c for c in chunks if c.path == focus.path and c.symbol_name), None)
+    pinned = next((c for c in chunks if c.source_type == "code" and c.path == focus.path
+                   and c.symbol_name), None)
     where = f"`{focus.path}`"
     if focus.start_line is not None:
         where += f" lines {focus.start_line}-{focus.end_line or focus.start_line}"
@@ -39,8 +37,21 @@ def describe_focus(focus: Focus | None, chunks: list[RetrievedChunk]) -> str | N
     return where
 
 
+def indexed_sources(stats: dict) -> list[str]:
+    """What the index holds, so the model knows which "why" questions are answerable."""
+    sources = ["code", "documentation"]
+    history = stats.get("history") or {}
+    if history.get("commits"):
+        sources.append("commit history")
+    if history.get("pull_requests"):
+        sources.append("pull requests")
+    if history.get("issues"):
+        sources.append("issues")
+    return sources
+
+
 def stream_answer(question: str, repo_name: str, chunks: list[RetrievedChunk],
-                  focus: Focus | None) -> Iterator[dict]:
+                  focus: Focus | None, sources: list[str]) -> Iterator[dict]:
     """Yield `{"event": ..., "data": ...}` dicts: delta*, then done | error."""
     settings = get_settings()
     if not chunks:
@@ -49,7 +60,7 @@ def stream_answer(question: str, repo_name: str, chunks: list[RetrievedChunk],
                        "ground an answer in. Try naming a file, symbol or concept."}}
         return
 
-    evidence = format_evidence(chunks, repo_name, describe_focus(focus, chunks), INDEXED_SOURCES)
+    evidence = format_evidence(chunks, repo_name, describe_focus(focus, chunks), sources)
     user_content = f"{evidence}\n\n<question>{question}</question>"
 
     try:

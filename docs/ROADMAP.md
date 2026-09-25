@@ -17,11 +17,13 @@ cited answer out.
 └──────────────┘                │    ├── retrieval/   hybrid: pgvector + tsvector + symbols + focus  │
                                 │    ├── answering/   evidence → Claude → streamed, cited answer     │
                                 │    ├── embeddings/  Embedder protocol (local fastembed default)    │
-                                │    └── (phase 2) history/   (phase 3) graph/                        │
+                                │    ├── history/     git log/-L, GitHub PRs+issues, links, provenance│
+                                │    └── (phase 3) graph/                                            │
                                 └───────────────────────────────┬────────────────────────────────────┘
                                                                 │
                                                    PostgreSQL 17 + pgvector
-                                     repositories · files · chunks (vector + tsvector)
+                     repositories · files · chunks (vector + tsvector)
+                     commits · commit_files · pull_requests · issues · links
 ```
 
 Module boundaries (each can evolve independently):
@@ -29,7 +31,8 @@ Module boundaries (each can evolve independently):
 | Module | Owns | Depends on |
 |---|---|---|
 | `ingestion` | turning a repo into `files` + `chunks` | embeddings, db |
-| `retrieval` | ranking evidence for a question (+ optional focus) | embeddings, db |
+| `retrieval` | ranking evidence for a question (+ optional focus) | embeddings, db, history |
+| `history` | commits, PRs, issues, links; line provenance | db, GitHub API, git |
 | `answering` | prompt contract, Claude call, streaming | retrieval output only |
 | `embeddings` | the `Embedder` protocol | — |
 | frontend | investigation UX | HTTP API only |
@@ -52,22 +55,36 @@ flow through the same retrieval and answering path.
 - Workspace UI: file explorer, highlighted code viewer, symbol/line-range focus, streamed
   answers with clickable citations that open and highlight the source
 
-## Phase 2: Git / PR / issue intelligence
+## Phase 2: Git / PR / issue intelligence ✅
 
 Goal: answer *why*, *who*, *when*, and *how it evolved*.
 
-1. **Commit ingestion** from the existing clone: `git log --numstat` → `commits` table
-   (sha, author, date, message, files touched) + commit-message chunks (`source_type=commit`).
-2. **Line provenance**: `git blame --porcelain` on demand for a focused range → the commits
-   that last touched those lines; `git log -L` for a function's evolution. Cache per (file, blob_sha).
-3. **GitHub API** (token optional for public repos): PRs (title, body, review comments, merged
-   commits) and issues (body, comments). Link PR ↔ commits by merge/squash SHAs, and PR ↔
-   issue via "fixes #123" references and the timeline API. Store as chunks + link table.
-4. **History-aware retrieval**: for a focused range, blame → commits → PRs → linked issues are
-   pinned as evidence, ahead of the semantic hits. This is the core of "why does this use Redis?".
-5. Prompt: add `commit`, `pull_request`, `issue` to `indexed_sources`; answers cite commit
-   SHAs, PR/issue numbers with authors and dates.
-6. UI: a history timeline for the focused code (commits and PRs on a time axis), blame gutter.
+- **Full clones** (line history needs every historical blob; a blobless clone made
+  `git log -L` take 40 s+ instead of 40 ms)
+- **Commit ingestion**: `git log --numstat` → `commits` + `commit_files`; every non-merge
+  commit becomes a `commit` chunk (message + files touched) for semantic and keyword search
+- **GitHub PRs and issues** via REST, resumable under rate limits: newest-updated first,
+  stop at the last complete crawl's watermark, and when cut short store GitHub's `next` link
+  (page- or cursor-based) in `repositories.sync`, with retry on transient network errors.
+  Upserted, never bulk-deleted, so data builds up across runs.
+- **Links** (`links` table, seed of the phase 3 graph): commit → PR from squash `(#N)` and
+  `Merge pull request #N` subjects plus `merge_commit_sha`; commits inside merged branches
+  (`rev-list p2 ^p1`) → PR; PR/commit/issue → issue via GitHub closing keywords
+  (`fixes`) and `#N` mentions
+- **Line provenance**: `git log -L` on the focused range (or the symbol a question names)
+  → the introducing commit + the most recent changes, each with the diff of that range →
+  their PRs → the issues those PRs fix. These are pinned as evidence right after the code.
+- **One-hop expansion**: a commit found by search brings its PR; a PR brings the issues it fixes
+- **Prompt**: history-aware rules (roles `introduced`/`modified`, cite SHAs/PRs/issues,
+  caveat that line history doesn't cross files)
+- **UI**: History tab with a line or file timeline (origin marker, PR/issue chips, inline
+  range diffs), commit view (message, stats, scoped/full diff), PR/issue view, and
+  type-aware evidence rows
+- **API**: `GET /history?path&start_line&end_line`, `GET /commits/{sha}?path`
+
+Deferred to later phases: PR review comments and issue comment threads (one request per
+item, costly without a token), cross-file code movement (`git log -L` stays within a file;
+phase 3's symbol graph can follow moves), incremental re-indexing.
 
 ## Phase 3: knowledge graph / relationship layer
 
@@ -92,10 +109,12 @@ Goal: *what is related* and *what breaks if I change this*.
 - Agentic investigations: multi-step tool use (search, blame, open PR, traverse graph) for
   questions that need several hops, with the evidence trail shown as it is gathered
 
-## Known limitations / next improvements in phase 1
+## Known limitations / next improvements
 
 - Embedding runs on CPU (~20 chunks/s). Fine for small/medium repos; a hosted code-embedding
   model or GPU would be the upgrade path (swap via `Embedder`).
 - Re-index rebuilds everything; incremental re-index by `blob_sha` is straightforward to add.
 - Single-turn questions (no follow-up context yet).
 - Ingestion runs in-process on a thread pool; move to a job queue once there are many repos.
+- Without `GITHUB_TOKEN`, large repos need several re-indexes (an hour apart) to fetch all
+  PRs and issues; the UI flags a partial sync.
