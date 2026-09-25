@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AlertTriangle, ArrowUp, Crosshair, FileSearch, Square, X, type LucideIcon } from "lucide-react";
-import type { Evidence, Focus } from "@/lib/api";
+import type { Evidence, Focus, Provider } from "@/lib/api";
 import { formatDate, TYPE_ICON } from "@/components/history/parts";
 
 export interface InvestigationRecord {
@@ -15,10 +15,11 @@ export interface InvestigationRecord {
   answer: string;
   status: "retrieving" | "answering" | "done" | "error";
   error?: string;
-  answeredBy?: { provider: "anthropic" | "ollama" | "briefing"; model: string };
+  answeredBy?: { provider: Provider; model: string };
 }
 
 const PROVIDER_LABEL = {
+  gemini: "Gemini",
   anthropic: "Claude",
   ollama: "local model",
   briefing: "evidence briefing · no language model",

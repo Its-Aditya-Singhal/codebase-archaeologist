@@ -11,8 +11,9 @@ two phases:
 2. Answer: the standard answer writer answers from the pool, with the same
    citation contract as a single-pass answer.
 
-The loop is provider-agnostic (`AgentModel`): Claude via the Anthropic API or a
-local model via Ollama. Without a model, agent mode falls back to single-pass.
+The loop is provider-agnostic (`AgentModel`): Gemini (Google AI Studio), Claude
+via the Anthropic API, or a local model via Ollama. Without a model, agent
+mode falls back to single-pass.
 """
 
 import json
@@ -25,6 +26,7 @@ from typing import Protocol
 import anthropic
 import httpx
 
+from app.answering import gemini
 from app.answering.answer import _client, choose_provider
 from app.config import get_settings
 from app.db import connection
@@ -268,6 +270,31 @@ class ClaudeAgentModel:
             for call, text in results]})
 
 
+class GeminiAgentModel:
+    def __init__(self) -> None:
+        self.name = get_settings().gemini_model
+        self.system = ""
+        self.contents: list[dict] = []
+
+    def start(self, system: str, user: str) -> None:
+        self.system, self.contents = system, [{"role": "user", "parts": [{"text": user}]}]
+
+    def next_calls(self) -> list[ToolCall]:
+        self.name, content = gemini.generate(self.system, self.contents, [
+            {"name": t["name"], "description": t["description"],
+             "parameters": t["input_schema"]} for t in TOOLS])
+        self.contents.append({**content, "role": "model"})  # unchanged: keeps signatures
+        return [ToolCall(fc.get("id") or uuid.uuid4().hex[:8], fc.get("name", ""),
+                         dict(fc.get("args") or {}))
+                for p in content.get("parts", []) if (fc := p.get("functionCall"))]
+
+    def send_results(self, results: list[tuple[ToolCall, str]]) -> None:
+        self.contents.append({"role": "user", "parts": [
+            {"functionResponse": {"name": call.name, "id": call.id,
+                                  "response": {"result": text}}}
+            for call, text in results]})
+
+
 class OllamaAgentModel:
     def __init__(self) -> None:
         self.name = get_settings().ollama_model
@@ -309,6 +336,8 @@ class OllamaAgentModel:
 
 def agent_model() -> AgentModel | None:
     provider = choose_provider()
+    if provider == "gemini":
+        return GeminiAgentModel()
     if provider == "anthropic":
         return ClaudeAgentModel()
     if provider == "ollama":
@@ -352,7 +381,7 @@ def investigate(repo: dict, question: str, seed: list[RetrievedChunk], model: Ag
     for _ in range(MAX_ROUNDS):
         try:
             calls = model.next_calls()
-        except (anthropic.APIError, httpx.HTTPError, RuntimeError) as exc:
+        except (anthropic.APIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
             log.warning("Agent model error: %s", exc)
             yield {"event": "step", "data": {"n": step + 1, "tool": None, "input": {},
                                              "summary": f"Stopped: the model failed ({exc})",

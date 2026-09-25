@@ -22,10 +22,17 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
 
-    # Who writes answers: "auto" picks Claude when an API key is set, else a
-    # local Ollama model when one is running, else an evidence briefing (no model).
-    # Force one with "anthropic" | "ollama" | "briefing".
+    # Who writes answers: "auto" picks Gemini when its key is set, else Claude
+    # when its key is set, else a local Ollama model when one is running, else an
+    # evidence briefing (no model). Force one with
+    # "gemini" | "anthropic" | "ollama" | "briefing".
     answer_provider: str = "auto"
+
+    # Gemini via Google AI Studio (has a free tier: aistudio.google.com/apikey).
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.8-flash"
+    # Used when the main model hits its free-tier rate limit (separate quota).
+    gemini_fallback_model: str = "gemini-3.5-flash-lite"
 
     # Claude (paid API). The key is read from backend/.env or the environment.
     anthropic_api_key: str | None = None
@@ -48,6 +55,13 @@ class Settings(BaseSettings):
     github_max_comment_requests: int = 200
 
     cors_origins: list[str] = ["http://localhost:3000"]
+
+    # Accounts: sessions are HttpOnly cookies. Set cookie_secure=true when the
+    # app is served over HTTPS.
+    session_days: int = 30
+    cookie_secure: bool = False
+    # Open sign-up; set false to stop new accounts (existing ones still log in).
+    allow_signup: bool = True
 
 
 @lru_cache

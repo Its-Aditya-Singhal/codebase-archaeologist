@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { UserMenu } from "@/components/auth/UserMenu";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Code2, GitCommitHorizontal, History, Network, TriangleAlert } from "lucide-react";
 import { api, ask, type Evidence, type FileDetail, type Focus, type Repo, type RepoFile } from "@/lib/api";
@@ -158,8 +159,9 @@ export function Workspace({ repoId }: { repoId: number }) {
             {repo.default_branch} @ {repo.head_sha.slice(0, 7)}
           </span>
         ) : null}
+        <div className="flex-1" />
         {repo?.stats.files ? (
-          <span className="ml-auto hidden items-center gap-2 font-mono text-[11px] text-faint lg:flex">
+          <span className="hidden items-center gap-2 font-mono text-[11px] text-faint lg:flex">
             {repo.stats.files} files · {repo.stats.symbols} symbols
             {h?.commits ? ` · ${h.commits} commits · ${h.pull_requests ?? 0} PRs · ${h.issues ?? 0} issues` : ""}
             {h?.github && !h.github.complete && h.github.note ? (
@@ -169,6 +171,7 @@ export function Workspace({ repoId }: { repoId: number }) {
             ) : null}
           </span>
         ) : null}
+        <UserMenu compact />
       </header>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)_420px]">

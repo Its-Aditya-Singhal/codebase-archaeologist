@@ -155,6 +155,10 @@ def client(embedder):
 
     from app.main import app
     with TestClient(app) as c:
+        assert c.get("/api/repos").status_code == 401  # everything needs an account
+        r = c.post("/api/auth/signup", json={"email": "Ann@Example.com",
+                                              "password": "correct horse battery"})
+        assert r.status_code == 201, r.text
         yield c
 
 
@@ -309,6 +313,46 @@ def test_explorer(client, indexed):
     out = client.get(f"/api/repos/{rid}/graph/nodes/{node['id']}/expand",
                      params={"kinds": "calls", "direction": "in"}).json()
     assert {n["label"] for n in out["nodes"]} >= {"run", "test_enqueue"}
+
+
+def test_accounts_and_isolation(client, indexed, sample_repo):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    me = client.get("/api/auth/me").json()
+    assert me["email"] == "ann@example.com"
+    rid = indexed["id"]
+    other = TestClient(app)  # no `with`: the app's lifespan belongs to `client`
+    assert other.post("/api/auth/signup", json={
+        "email": "ann@example.com", "password": "another password"}).status_code == 409
+    assert other.post("/api/auth/signup", json={
+        "email": "bob@example.com", "password": "short"}).status_code == 422
+    assert other.post("/api/auth/signup", json={
+        "email": "bob@example.com", "password": "bobs secret pass"}).status_code == 201
+    # Bob cannot see or reach Ann's repository or investigations.
+    assert other.get("/api/repos").json() == []
+    assert other.get(f"/api/repos/{rid}").status_code == 404
+    assert other.get(f"/api/repos/{rid}/files").status_code == 404
+    inv = client.get(f"/api/repos/{rid}/investigations").json()
+    if inv:
+        assert other.get(f"/api/investigations/{inv[0]['id']}").status_code == 404
+    # Adding the same repository shares the index instead of rebuilding it.
+    shared = other.post("/api/repos", json={"url": str(sample_repo)}).json()
+    assert shared["id"] == rid and shared["status"] == "ready"
+    assert other.get(f"/api/repos/{rid}/investigations").json() == []
+    # Removing it only removes it from Bob's list.
+    assert other.delete(f"/api/repos/{rid}").status_code == 204
+    assert other.get("/api/repos").json() == []
+    assert client.get(f"/api/repos/{rid}").json()["status"] == "ready"
+
+    other.post("/api/auth/logout")
+    assert other.get("/api/auth/me").status_code == 401
+    assert other.post("/api/auth/login", json={
+        "email": "BOB@example.com", "password": "wrong password"}).status_code == 401
+    assert other.post("/api/auth/login", json={
+        "email": "BOB@example.com", "password": "bobs secret pass"}).status_code == 200
+    assert other.get("/api/auth/me").json()["email"] == "bob@example.com"
 
 
 def test_reindex_is_incremental(client, indexed, sample_repo, embedder):

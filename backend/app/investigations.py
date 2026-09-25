@@ -28,11 +28,11 @@ class PriorTurn:
     focus: dict | None
 
 
-def create(repo_id: int, title: str) -> int:
+def create(repo_id: int, user_id: int, title: str) -> int:
     with connection() as conn:
         return conn.execute(
-            "INSERT INTO investigations (repo_id, title) VALUES (%s, %s) RETURNING id",
-            (repo_id, _title(title))).fetchone()["id"]
+            "INSERT INTO investigations (repo_id, user_id, title) VALUES (%s, %s, %s) "
+            "RETURNING id", (repo_id, user_id, _title(title))).fetchone()["id"]
 
 
 def _title(question: str) -> str:
@@ -43,7 +43,7 @@ def _title(question: str) -> str:
 def get(investigation_id: int, with_turns: bool = True) -> dict | None:
     with connection() as conn:
         inv = conn.execute(
-            """SELECT i.id, i.repo_id, i.title, i.created_at, i.updated_at,
+            """SELECT i.id, i.repo_id, i.user_id, i.title, i.created_at, i.updated_at,
                       count(t.id) AS turns
                FROM investigations i LEFT JOIN investigation_turns t
                  ON t.investigation_id = i.id
@@ -58,15 +58,15 @@ def get(investigation_id: int, with_turns: bool = True) -> dict | None:
     return inv
 
 
-def list_for_repo(repo_id: int) -> list[dict]:
+def list_for_repo(repo_id: int, user_id: int) -> list[dict]:
     with connection() as conn:
         return conn.execute(
             """SELECT i.id, i.title, i.created_at, i.updated_at, count(t.id) AS turns,
                       (array_agg(t.question ORDER BY t.position DESC))[1] AS last_question
                FROM investigations i LEFT JOIN investigation_turns t
                  ON t.investigation_id = i.id
-               WHERE i.repo_id = %s GROUP BY i.id ORDER BY i.updated_at DESC""",
-            (repo_id,)).fetchall()
+               WHERE i.repo_id = %s AND i.user_id = %s
+               GROUP BY i.id ORDER BY i.updated_at DESC""", (repo_id, user_id)).fetchall()
 
 
 def rename(investigation_id: int, title: str) -> bool:

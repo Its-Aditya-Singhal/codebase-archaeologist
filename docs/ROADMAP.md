@@ -185,6 +185,8 @@ Also completed alongside:
   job queue is the step up once many repositories are indexed concurrently.
 - Without `GITHUB_TOKEN` (60 requests/hour), large repos need several re-indexes an hour apart
   to fetch all PRs, issues and discussions; everything resumes where it stopped.
-- The Claude answer/agent paths are implemented against the documented SDK but have not been
-  run against the live API in this project (no key); the briefing and data paths are tested.
-- No authentication: the API is meant for local use.
+- The Gemini and Claude answer/agent paths are tested against canned API responses but have not
+  been run against the live APIs in this project; the briefing and data paths are tested end to end.
+- Accounts are email/password only: no email verification, password reset or OAuth yet. Login
+  throttling is in memory (per process). A server-wide `GITHUB_TOKEN` is used for every user's
+  clones, so on a shared deployment it should not have access to private repositories.

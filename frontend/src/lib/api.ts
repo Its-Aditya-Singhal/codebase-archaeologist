@@ -228,48 +228,102 @@ function locationQuery(focus: Focus): URLSearchParams {
   return q;
 }
 
+export const AUTH_PAGES = ["/login", "/signup"];
+/** Dispatched on window when the API says the session is gone (AuthProvider listens). */
+export const SESSION_EXPIRED = "archaeologist:session-expired";
+
+/** fetch with the session cookie. */
+async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, { ...init, credentials: "include" });
+  if (res.status === 401 && typeof window !== "undefined") {
+    window.dispatchEvent(new Event(SESSION_EXPIRED));
+  }
+  return res;
+}
+
+export interface User {
+  id: number;
+  email: string;
+  name: string;
+  created_at: string;
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      detail =
+        typeof body.detail === "string"
+          ? body.detail
+          : Array.isArray(body.detail) // request validation errors
+            ? body.detail.map((d: { loc?: string[]; msg: string }) =>
+                `${d.loc?.at(-1) ?? "input"}: ${d.msg.replace(/^Value error, /, "")}`,
+              ).join("; ")
+            : JSON.stringify(body.detail);
     } catch {}
     throw new Error(detail);
   }
   return res.json() as Promise<T>;
 }
 
+export const auth = {
+  /** The logged-in user, or null. */
+  me: async (): Promise<User | null> => {
+    const res = await fetch(`${API_URL}/api/auth/me`, { credentials: "include" });
+    return res.status === 401 ? null : json<User>(res);
+  },
+  config: () =>
+    fetch(`${API_URL}/api/auth/config`).then(json<{ signup_enabled: boolean }>),
+  login: (email: string, password: string) =>
+    fetch(`${API_URL}/api/auth/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    }).then(json<User>),
+  signup: (email: string, password: string, name: string) =>
+    fetch(`${API_URL}/api/auth/signup`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password, name }),
+    }).then(json<User>),
+  logout: () => fetch(`${API_URL}/api/auth/logout`, { method: "POST", credentials: "include" }),
+};
+
 export const api = {
-  listRepos: () => fetch(`${API_URL}/api/repos`).then(json<Repo[]>),
-  getRepo: (id: number) => fetch(`${API_URL}/api/repos/${id}`).then(json<Repo>),
+  listRepos: () => apiFetch(`${API_URL}/api/repos`).then(json<Repo[]>),
+  getRepo: (id: number) => apiFetch(`${API_URL}/api/repos/${id}`).then(json<Repo>),
   createRepo: (url: string) =>
-    fetch(`${API_URL}/api/repos`, {
+    apiFetch(`${API_URL}/api/repos`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ url }),
     }).then(json<Repo>),
   reindex: (id: number) =>
-    fetch(`${API_URL}/api/repos/${id}/reindex`, { method: "POST" }).then(json<Repo>),
-  deleteRepo: (id: number) => fetch(`${API_URL}/api/repos/${id}`, { method: "DELETE" }),
-  listFiles: (id: number) => fetch(`${API_URL}/api/repos/${id}/files`).then(json<RepoFile[]>),
+    apiFetch(`${API_URL}/api/repos/${id}/reindex`, { method: "POST" }).then(json<Repo>),
+  deleteRepo: (id: number) => apiFetch(`${API_URL}/api/repos/${id}`, { method: "DELETE" }),
+  listFiles: (id: number) => apiFetch(`${API_URL}/api/repos/${id}/files`).then(json<RepoFile[]>),
   getFile: (id: number, path: string) =>
-    fetch(`${API_URL}/api/repos/${id}/file?path=${encodeURIComponent(path)}`).then(
+    apiFetch(`${API_URL}/api/repos/${id}/file?path=${encodeURIComponent(path)}`).then(
       json<FileDetail>,
     ),
   history: (id: number, focus: Focus) =>
-    fetch(`${API_URL}/api/repos/${id}/history?${locationQuery(focus)}`).then(json<Timeline>),
+    apiFetch(`${API_URL}/api/repos/${id}/history?${locationQuery(focus)}`).then(json<Timeline>),
   graph: (id: number, focus: Focus) =>
-    fetch(`${API_URL}/api/repos/${id}/graph?${locationQuery(focus)}`).then(json<Neighborhood>),
+    apiFetch(`${API_URL}/api/repos/${id}/graph?${locationQuery(focus)}`).then(json<Neighborhood>),
   impact: (id: number, focus: Focus) =>
-    fetch(`${API_URL}/api/repos/${id}/impact?${locationQuery(focus)}`).then(json<Impact>),
+    apiFetch(`${API_URL}/api/repos/${id}/impact?${locationQuery(focus)}`).then(json<Impact>),
   rebuildGraph: (id: number) =>
-    fetch(`${API_URL}/api/repos/${id}/graph/rebuild`, { method: "POST" }).then(json<Repo>),
+    apiFetch(`${API_URL}/api/repos/${id}/graph/rebuild`, { method: "POST" }).then(json<Repo>),
   commit: (id: number, sha: string, path?: string | null) =>
-    fetch(
+    apiFetch(
       `${API_URL}/api/repos/${id}/commits/${sha}${path ? `?path=${encodeURIComponent(path)}` : ""}`,
     ).then(json<CommitDetail>),
 };
+
+export type Provider = "gemini" | "anthropic" | "ollama" | "briefing";
 
 export type AskEvent =
   | { event: "sources"; data: Evidence[] }
@@ -279,7 +333,7 @@ export type AskEvent =
       data: {
         stop_reason: string;
         model: string;
-        provider: "anthropic" | "ollama" | "briefing";
+        provider: Provider;
         usage: Record<string, number>;
       };
     }
@@ -292,7 +346,7 @@ export async function* ask(
   focus: Focus | null,
   signal?: AbortSignal,
 ): AsyncGenerator<AskEvent> {
-  const res = await fetch(`${API_URL}/api/repos/${repoId}/ask`, {
+  const res = await apiFetch(`${API_URL}/api/repos/${repoId}/ask`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({

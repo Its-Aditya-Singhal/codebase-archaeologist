@@ -1,9 +1,10 @@
 """Grounded answering: retrieved evidence in, a cited answer streamed out.
 
-Three interchangeable writers share one contract (numbered evidence, [S#]
+Interchangeable writers share one contract (numbered evidence, [S#]
 citations, `delta`* then `done` | `error` events):
 
-- Claude via the Anthropic API: the strongest answers; needs a paid API key
+- Gemini via Google AI Studio: free tier with a Google API key (gemini.py)
+- Claude via the Anthropic API: needs a paid API key
 - a local model via Ollama: free, runs on this machine
 - an evidence briefing: no model at all (app/answering/briefing.py)
 
@@ -19,6 +20,7 @@ from functools import lru_cache
 import anthropic
 import httpx
 
+from app.answering import gemini
 from app.answering.briefing import build_briefing
 from app.answering.prompts import SYSTEM_PROMPT, format_evidence
 from app.config import get_settings
@@ -57,6 +59,8 @@ def choose_provider() -> str:
     settings = get_settings()
     if settings.answer_provider != "auto":
         return settings.answer_provider
+    if settings.gemini_api_key:
+        return "gemini"
     if settings.anthropic_api_key:
         return "anthropic"
     if _ollama_ready():
@@ -125,10 +129,36 @@ def stream_answer(question: str, repo_name: str, chunks: list[RetrievedChunk],
                                          "provider": "briefing", "usage": {}}}
         return
     focus_desc = describe_focus(focus, chunks)
-    if provider == "ollama":
+    if provider == "gemini":
+        yield from _stream_gemini(question, repo_name, chunks, focus_desc, sources, prior)
+    elif provider == "ollama":
         yield from _stream_ollama(question, repo_name, chunks, focus_desc, sources, prior)
     else:
         yield from _stream_claude(question, repo_name, chunks, focus_desc, sources, prior)
+
+
+# ----------------------------------------------------------------------- gemini
+
+
+def _stream_gemini(question: str, repo_name: str, chunks: list[RetrievedChunk],
+                   focus_desc: str | None, sources: list[str],
+                   prior: list[PriorTurn]) -> Iterator[dict]:
+    evidence = format_evidence(chunks, repo_name, focus_desc, sources)
+    messages = _messages(prior, f"{evidence}\n\n<question>{question}</question>")
+    try:
+        for piece in gemini.stream(SYSTEM_PROMPT, messages):
+            if "text" in piece:
+                yield {"event": "delta", "data": {"text": piece["text"]}}
+            else:
+                done = piece["done"]
+                yield {"event": "done", "data": {
+                    "stop_reason": done["finish"].lower(), "model": done["model"],
+                    "provider": "gemini", "usage": done["usage"]}}
+    except gemini.GeminiError as exc:
+        yield {"event": "error", "data": {"message": str(exc)}}
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("Gemini error: %s", exc)
+        yield {"event": "error", "data": {"message": f"Could not reach the Gemini API ({exc})."}}
 
 
 # ------------------------------------------------------------------ local model

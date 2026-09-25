@@ -5,12 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app import investigations
+from app import auth, investigations
 from app.answering.agent import agent_model, investigate
 from app.answering.answer import indexed_sources, stream_answer
 from app.config import get_settings
@@ -69,9 +69,15 @@ app = FastAPI(title="Codebase Archaeologist", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins,
+    allow_credentials=True,  # the session cookie
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth.router)
+# Everything else needs a logged-in user, who only sees their own repositories
+# and investigations (see auth.authorize).
+api = APIRouter(dependencies=[Depends(auth.authorize)])
+CurrentUser = auth.CurrentUser
 
 REPO_COLUMNS = """id, url, owner, name, default_branch, head_sha, status, progress, stats, error,
                   created_at, indexed_at"""
@@ -98,8 +104,8 @@ def health():
     return {"ok": True}
 
 
-@app.post("/api/repos", status_code=202)
-def create_repo(body: CreateRepo):
+@api.post("/api/repos", status_code=202)
+def create_repo(body: CreateRepo, user: CurrentUser):
     try:
         ref = parse_repo_ref(body.url)
     except RepoSourceError as exc:
@@ -111,6 +117,8 @@ def create_repo(body: CreateRepo):
                 RETURNING {REPO_COLUMNS}""",
             (ref.url, ref.owner, ref.name),
         ).fetchone()
+        conn.execute("INSERT INTO user_repositories (user_id, repo_id) VALUES (%s, %s) "
+                     "ON CONFLICT DO NOTHING", (user["id"], row["id"]))
     # New (or previously failed) repos start indexing; an already-indexed repo is
     # returned as-is and can be refreshed explicitly via /reindex.
     if row["status"] in ("queued", "failed"):
@@ -126,19 +134,21 @@ def _start_ingest(repo_id: int, resumes: int = 0) -> None:
     _ingest_pool.submit(ingest_repository, repo_id)
 
 
-@app.get("/api/repos")
-def list_repos():
+@api.get("/api/repos")
+def list_repos(user: CurrentUser):
     with connection() as conn:
         return conn.execute(
-            f"SELECT {REPO_COLUMNS} FROM repositories ORDER BY created_at DESC").fetchall()
+            f"""SELECT {REPO_COLUMNS} FROM repositories
+                WHERE id IN (SELECT repo_id FROM user_repositories WHERE user_id = %s)
+                ORDER BY created_at DESC""", (user["id"],)).fetchall()
 
 
-@app.get("/api/repos/{repo_id}")
+@api.get("/api/repos/{repo_id}")
 def get_repo(repo_id: int):
     return _get_repo(repo_id)
 
 
-@app.post("/api/repos/{repo_id}/reindex", status_code=202)
+@api.post("/api/repos/{repo_id}/reindex", status_code=202)
 def reindex_repo(repo_id: int):
     repo = _get_repo(repo_id)
     if repo["status"] in IN_PROGRESS:
@@ -147,16 +157,23 @@ def reindex_repo(repo_id: int):
     return _get_repo(repo_id)
 
 
-@app.delete("/api/repos/{repo_id}", status_code=204)
-def delete_repo(repo_id: int):
-    with connection() as conn:
-        conn.execute("DELETE FROM repositories WHERE id = %s", (repo_id,))
+@api.delete("/api/repos/{repo_id}", status_code=204)
+def delete_repo(repo_id: int, user: CurrentUser):
+    """Remove the repository from this user's list (and their investigations of
+    it); the index itself is deleted once no user has the repository."""
+    with connection() as conn, conn.transaction():
+        conn.execute("DELETE FROM investigations WHERE repo_id = %s AND user_id = %s",
+                     (repo_id, user["id"]))
+        conn.execute("DELETE FROM user_repositories WHERE repo_id = %s AND user_id = %s",
+                     (repo_id, user["id"]))
+        conn.execute("DELETE FROM repositories WHERE id = %s AND NOT EXISTS "
+                     "(SELECT 1 FROM user_repositories WHERE repo_id = %s)", (repo_id, repo_id))
 
 
 # ----------------------------------------------------------------- exploration
 
 
-@app.get("/api/repos/{repo_id}/files")
+@api.get("/api/repos/{repo_id}/files")
 def list_files(repo_id: int):
     _get_repo(repo_id)
     with connection() as conn:
@@ -169,7 +186,7 @@ def list_files(repo_id: int):
         ).fetchall()
 
 
-@app.get("/api/repos/{repo_id}/file")
+@api.get("/api/repos/{repo_id}/file")
 def get_file(repo_id: int, path: str = Query(...)):
     with connection() as conn:
         f = conn.execute(
@@ -200,7 +217,7 @@ def get_file(repo_id: int, path: str = Query(...)):
 # ----------------------------------------------------------------------- history
 
 
-@app.get("/api/repos/{repo_id}/history")
+@api.get("/api/repos/{repo_id}/history")
 def get_history(repo_id: int, path: str = Query(...), start_line: int | None = None,
                 end_line: int | None = None):
     """Every commit that changed a line range (or file), newest first, with the
@@ -209,7 +226,7 @@ def get_history(repo_id: int, path: str = Query(...), start_line: int | None = N
     return timeline(repo, path, start_line, end_line)
 
 
-@app.get("/api/repos/{repo_id}/evolution")
+@api.get("/api/repos/{repo_id}/evolution")
 def get_evolution(repo_id: int, path: str = Query(...), start_line: int = Query(..., ge=1),
                   end_line: int | None = None):
     """The code's versions over time, oldest first: each commit that changed it,
@@ -219,7 +236,7 @@ def get_evolution(repo_id: int, path: str = Query(...), start_line: int = Query(
     return evolution(repo, path, start_line, end_line or start_line)
 
 
-@app.get("/api/repos/{repo_id}/commits/{sha}")
+@api.get("/api/repos/{repo_id}/commits/{sha}")
 def get_commit(repo_id: int, sha: str, path: str | None = None):
     if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
         raise HTTPException(422, "Expected a (short) hex commit SHA")
@@ -233,7 +250,7 @@ def get_commit(repo_id: int, sha: str, path: str | None = None):
 # ------------------------------------------------------------------------- graph
 
 
-@app.get("/api/repos/{repo_id}/graph")
+@api.get("/api/repos/{repo_id}/graph")
 def get_graph(repo_id: int, path: str = Query(...), start_line: int | None = None,
               end_line: int | None = None, history: bool = True):
     """The knowledge-graph neighbourhood of a symbol (selected lines) or file:
@@ -246,7 +263,7 @@ def get_graph(repo_id: int, path: str = Query(...), start_line: int | None = Non
     return result
 
 
-@app.get("/api/repos/{repo_id}/impact")
+@api.get("/api/repos/{repo_id}/impact")
 def get_impact(repo_id: int, path: str = Query(...), start_line: int | None = None,
                end_line: int | None = None):
     """What could break if this code changes: everything that reaches it through
@@ -259,7 +276,7 @@ def get_impact(repo_id: int, path: str = Query(...), start_line: int | None = No
     return result
 
 
-@app.get("/api/repos/{repo_id}/graph/overview")
+@api.get("/api/repos/{repo_id}/graph/overview")
 def graph_overview(repo_id: int, level: str = Query("file", pattern="^(file|dir)$"),
                    depth: int = Query(2, ge=1, le=6), limit: int = Query(150, ge=10, le=1000),
                    tests: bool = True, packages: bool = True):
@@ -270,7 +287,7 @@ def graph_overview(repo_id: int, level: str = Query("file", pattern="^(file|dir)
     return explore.overview(repo_id, level, depth, limit, tests, packages)
 
 
-@app.get("/api/repos/{repo_id}/graph/search")
+@api.get("/api/repos/{repo_id}/graph/search")
 def graph_search(repo_id: int, q: str = Query(..., min_length=1),
                  kinds: Annotated[list[str] | None, Query()] = None,
                  limit: int = Query(20, ge=1, le=100)):
@@ -278,7 +295,7 @@ def graph_search(repo_id: int, q: str = Query(..., min_length=1),
     return explore.search(repo_id, q, kinds, limit)
 
 
-@app.get("/api/repos/{repo_id}/graph/nodes/{node_id}")
+@api.get("/api/repos/{repo_id}/graph/nodes/{node_id}")
 def graph_node(repo_id: int, node_id: int):
     detail = explore.node_detail(repo_id, node_id)
     if detail is None:
@@ -286,7 +303,7 @@ def graph_node(repo_id: int, node_id: int):
     return detail
 
 
-@app.get("/api/repos/{repo_id}/graph/nodes/{node_id}/expand")
+@api.get("/api/repos/{repo_id}/graph/nodes/{node_id}/expand")
 def graph_expand(repo_id: int, node_id: int,
                  kinds: Annotated[list[str] | None, Query()] = None,
                  direction: str = Query("both", pattern="^(in|out|both)$"),
@@ -300,7 +317,7 @@ def graph_expand(repo_id: int, node_id: int,
     return result
 
 
-@app.post("/api/repos/{repo_id}/graph/rebuild")
+@api.post("/api/repos/{repo_id}/graph/rebuild")
 def rebuild_repo_graph(repo_id: int):
     """Rebuild only the graph from the stored index (no clone, parse or embed)."""
     repo = _get_repo(repo_id)
@@ -361,15 +378,15 @@ def _ready_repo(repo_id: int) -> dict:
     return repo
 
 
-@app.post("/api/repos/{repo_id}/search")
+@api.post("/api/repos/{repo_id}/search")
 def search_repo(repo_id: int, body: AskIn):
     _ready_repo(repo_id)
     focus = Focus(**body.focus.model_dump()) if body.focus else None
     return [c.to_dict() for c in search(repo_id, body.question, body.limit, focus)]
 
 
-@app.post("/api/repos/{repo_id}/ask")
-def ask(repo_id: int, body: AskIn):
+@api.post("/api/repos/{repo_id}/ask")
+def ask(repo_id: int, body: AskIn, user: CurrentUser):
     """Server-sent events: `investigation` ({id}), in agent mode `step`* (each tool
     call and what it found), `sources` (the evidence, S1..Sn), `delta`* (answer
     text), then `done` or `error`. The turn is saved to the investigation, and
@@ -378,11 +395,11 @@ def ask(repo_id: int, body: AskIn):
     focus = Focus(**body.focus.model_dump()) if body.focus else None
     if body.investigation_id is not None:
         inv = investigations.get(body.investigation_id, with_turns=False)
-        if inv is None or inv["repo_id"] != repo_id:
+        if inv is None or inv["repo_id"] != repo_id or inv["user_id"] != user["id"]:
             raise HTTPException(404, "Investigation not found for this repository")
         inv_id = inv["id"]
     else:
-        inv_id = investigations.create(repo_id, body.question)
+        inv_id = investigations.create(repo_id, user["id"], body.question)
     prior = investigations.prior_turns(inv_id)
 
     def events():
@@ -429,8 +446,9 @@ def _agent_steps(repo: dict, question: str, seed: list, prior: list):
     if model is None:
         yield {"event": "step", "data": {
             "n": 1, "tool": None, "input": {}, "added": [],
-            "summary": "Agent mode needs a language model (a local Ollama model or a Claude API "
-                       "key); answered from single-pass retrieval instead."}}
+            "summary": "Agent mode needs a language model (a Gemini API key, a local Ollama "
+                       "model or a Claude API key); answered from single-pass retrieval "
+                       "instead."}}
         return
     context = "".join(f"<earlier_question>{t.question}</earlier_question>\n" for t in prior)
     yield from investigate(repo, question, seed, model, context)
@@ -443,13 +461,13 @@ class RenameIn(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
-@app.get("/api/repos/{repo_id}/investigations")
-def list_investigations(repo_id: int):
+@api.get("/api/repos/{repo_id}/investigations")
+def list_investigations(repo_id: int, user: CurrentUser):
     _get_repo(repo_id)
-    return investigations.list_for_repo(repo_id)
+    return investigations.list_for_repo(repo_id, user["id"])
 
 
-@app.get("/api/investigations/{investigation_id}")
+@api.get("/api/investigations/{investigation_id}")
 def get_investigation(investigation_id: int):
     inv = investigations.get(investigation_id)
     if inv is None:
@@ -457,14 +475,14 @@ def get_investigation(investigation_id: int):
     return inv
 
 
-@app.patch("/api/investigations/{investigation_id}")
+@api.patch("/api/investigations/{investigation_id}")
 def rename_investigation(investigation_id: int, body: RenameIn):
     if not investigations.rename(investigation_id, body.title):
         raise HTTPException(404, "Investigation not found")
     return investigations.get(investigation_id, with_turns=False)
 
 
-@app.delete("/api/investigations/{investigation_id}", status_code=204)
+@api.delete("/api/investigations/{investigation_id}", status_code=204)
 def delete_investigation(investigation_id: int):
     if not investigations.delete(investigation_id):
         raise HTTPException(404, "Investigation not found")
@@ -472,3 +490,6 @@ def delete_investigation(investigation_id: int):
 
 def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+app.include_router(api)

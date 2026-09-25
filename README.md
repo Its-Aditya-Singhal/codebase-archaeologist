@@ -36,9 +36,11 @@ and cites every source, so the developer can check it.
 - PR and issue discussions (incl. review comments) as evidence
 - Incremental re-indexing: only new or changed code and history is re-embedded
 - Streamed, cited answers with inline `[S#]` citations; clicking one opens the source
-  (code, commit, PR or issue). Three answer writers, picked automatically:
-  an **evidence briefing** (no model, free, the default), a **local model via Ollama** (free),
-  or **Claude** (paid API key, strongest answers)
+  (code, commit, PR or issue). Four answer writers, picked automatically:
+  **Gemini** (free Google AI Studio key), an **evidence briefing** (no model, free),
+  a **local model via Ollama** (free), or **Claude** (paid API key)
+- Accounts: email/password sign-up and login; each user sees only their own repositories and
+  case files (a repository added by several users is indexed once and shared)
 
 ## Stack
 
@@ -48,7 +50,8 @@ and cites every source, so the developer can check it.
 | API | Python 3.13, FastAPI | Ingestion/parsing/ML ecosystem (tree-sitter, local embeddings) lives in Python |
 | Data | PostgreSQL 17 + pgvector (HNSW), `tsvector` | One store for relational data, vectors, full-text and the graph (node/edge tables) |
 | Embeddings | `BAAI/bge-small-en-v1.5` via fastembed (local) | Indexing needs no API key; swappable behind `Embedder` |
-| Answers | Evidence briefing (no model) · Ollama local model · Claude Opus 5 | Works for free out of the box; better writers are drop-in |
+| Answers | Gemini (free tier) · evidence briefing (no model) · Ollama local model · Claude | Works for free; writers are drop-in |
+| Auth | scrypt password hashes, HttpOnly session cookie (hashed in the DB) | Standard library only, no auth service |
 
 ## Setup
 
@@ -83,12 +86,21 @@ npm run dev
 
 | Writer | Setup | What you get |
 |---|---|---|
+| Gemini | `GEMINI_API_KEY` in `backend/.env` ([free key](https://aistudio.google.com/apikey)) | Written, cited answers and agent mode. Free tier: rate limited per minute/day, and Google may use free-tier prompts (your indexed code) to improve its products |
 | Evidence briefing | nothing | A cited digest of the evidence: what the code is, where it came from, what calls it, impact. No interpretation. |
 | Local model (Ollama) | `brew install ollama`, `ollama serve`, `ollama pull qwen2.5-coder:7b` (~4.7 GB; 16 GB RAM recommended) | Written, cited answers, generated on your machine |
 | Claude | `ANTHROPIC_API_KEY` in `backend/.env` (paid) | The strongest reasoning and citation discipline |
 
-`ANSWER_PROVIDER=auto` (default) uses Claude if a key is set, else Ollama if it is running with
-the model pulled, else the briefing. `OLLAMA_MODEL` picks another local model.
+`ANSWER_PROVIDER=auto` (default) uses Gemini if its key is set, else Claude if its key is set,
+else Ollama if it is running with the model pulled, else the briefing. `GEMINI_MODEL` (default
+`gemini-3.8-flash`) is retried on `GEMINI_FALLBACK_MODEL` (`gemini-3.5-flash-lite`, its own
+quota) when rate limited. `OLLAMA_MODEL` picks another local model.
+
+### Accounts
+
+Open the app and create an account. The **first** account adopts the repositories and
+investigations created before accounts existed. Set `ALLOW_SIGNUP=false` to stop new sign-ups,
+and `COOKIE_SECURE=true` when serving over HTTPS.
 
 The first indexing run downloads the embedding model (~130 MB). Without `GITHUB_TOKEN` the
 GitHub API allows 60 requests/hour, so PR/issue sync for larger repos finishes over several
@@ -98,6 +110,8 @@ re-indexes (it resumes where it stopped). With a token it completes in one run.
 
 | Method | Path | |
 |---|---|---|
+| `POST` | `/api/auth/signup` `{email, password, name?}` · `/api/auth/login` · `/api/auth/logout` | sets / clears the session cookie |
+| `GET` | `/api/auth/me` · `/api/auth/config` | current user · whether sign-up is open |
 | `POST` | `/api/repos` `{url}` | register + start indexing |
 | `GET` | `/api/repos`, `/api/repos/{id}` | status, progress, stats |
 | `POST` | `/api/repos/{id}/reindex` | re-clone/fetch and update the index (incremental) |
@@ -117,6 +131,8 @@ re-indexes (it resumes where it stopped). With a token it completes in one run.
 | `GET` `PATCH` `DELETE` | `/api/investigations/{inv}` | open (turns with evidence) · rename · delete |
 
 `focus` is `{path, start_line?, end_line?}`; `mode` is `answer` (default) or `agent`.
+Everything except `/api/health` and `/api/auth/*` needs a session; another user's repositories
+and investigations answer 404.
 
 ## Development
 
@@ -141,12 +157,15 @@ backend/app/
                build (graph over code + history), query (neighbourhood, impact, related code),
                explore (overview, search, expand)
   retrieval/   hybrid (vector + lexical + symbol + focus + graph + provenance, RRF)
-  answering/   prompts, answer (Claude | Ollama | briefing), briefing, agent (tool loop)
+  answering/   prompts, answer (Gemini | Claude | Ollama | briefing), gemini, briefing,
+               agent (tool loop)
+  auth.py      sign-up, login, sessions, per-user access guard
   investigations.py  case files: saved turns, follow-up context
   migrations/  numbered SQL, applied in order on startup
   embeddings/  Embedder protocol + local fastembed
 frontend/src/
-  app/                  landing (sites) + /repos/[id] workspace
+  app/                  landing (sites) + /repos/[id] workspace + /login, /signup
+  components/auth       AuthProvider (session gate) · AuthForm · UserMenu
   components/workspace  FileExplorer · CodeViewer · Investigation
   components/history    TimelinePanel · CommitView/RecordView · Diff and PR/issue chips
   components/graph      RelationsPanel · NeighborhoodGraph · ImpactView

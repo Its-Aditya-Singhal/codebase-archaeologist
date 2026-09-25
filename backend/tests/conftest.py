@@ -14,4 +14,5 @@ _base = os.environ.get("TEST_DATABASE_URL_BASE", "postgresql://localhost:5432")
 os.environ["DATABASE_URL"] = f"{_base}/{TEST_DATABASE}"
 os.environ["ANSWER_PROVIDER"] = "briefing"  # no model calls in tests
 os.environ["ANTHROPIC_API_KEY"] = ""
+os.environ["GEMINI_API_KEY"] = ""
 os.environ["GITHUB_TOKEN"] = ""

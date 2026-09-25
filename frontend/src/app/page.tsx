@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ArrowRight, GitBranch, Loader2, RotateCw, Trash2 } from "lucide-react";
 import { api, IN_PROGRESS, type Repo } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
+import { UserMenu } from "@/components/auth/UserMenu";
 
 const EXAMPLES = ["rq/rq", "pallets/flask", "encode/httpx"];
 
@@ -55,9 +56,12 @@ export default function Home() {
   return (
     <main className="survey-grid min-h-full">
       <div className="mx-auto max-w-4xl px-4 py-16 sm:px-6 sm:py-24">
-        <p className="font-mono text-xs uppercase tracking-[0.25em] text-lamp">
-          Codebase Archaeologist
-        </p>
+        <div className="flex items-center justify-between gap-4">
+          <p className="font-mono text-xs uppercase tracking-[0.25em] text-lamp">
+            Codebase Archaeologist
+          </p>
+          <UserMenu />
+        </div>
         <h1 className="mt-4 font-display text-5xl leading-[1.05] text-parchment sm:text-6xl">
           Find out <em className="text-lamp">why</em> the code is the way it is.
         </h1>
