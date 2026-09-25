@@ -1,9 +1,9 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
-import { auth, AUTH_PAGES, SESSION_EXPIRED, type User } from "@/lib/api";
+import { auth, PUBLIC_PAGES, SESSION_EXPIRED, type User } from "@/lib/api";
 
 interface AuthState {
   user: User | null;
@@ -26,7 +26,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [checked, setChecked] = useState(false);
   const [unreachable, setUnreachable] = useState(false);
-  const publicPage = AUTH_PAGES.includes(pathname);
+  const publicPage = PUBLIC_PAGES.includes(pathname);
+  const signingOut = useRef(false);
 
   useEffect(() => {
     auth
@@ -44,16 +45,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (checked && !unreachable && !user && !publicPage) {
+    if (publicPage) signingOut.current = false;
+  }, [publicPage]);
+
+  useEffect(() => {
+    if (checked && !unreachable && !user && !publicPage && !signingOut.current) {
       const next = window.location.pathname + window.location.search;
       router.replace(`/login?next=${encodeURIComponent(next)}`);
     }
   }, [checked, unreachable, user, publicPage, router]);
 
   const logout = useCallback(async () => {
+    signingOut.current = true;
     await auth.logout();
     setUser(null);
-    router.replace("/login");
+    router.replace("/");
   }, [router]);
 
   let content = children;
@@ -73,9 +79,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     );
   }
 
-  return (
-    <AuthContext.Provider value={{ user, setUser, logout }}>{content}</AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={{ user, setUser, logout }}>{content}</AuthContext.Provider>;
 }
 
 function Centered({ children }: { children: React.ReactNode }) {

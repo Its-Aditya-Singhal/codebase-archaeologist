@@ -229,6 +229,8 @@ function locationQuery(focus: Focus): URLSearchParams {
 }
 
 export const AUTH_PAGES = ["/login", "/signup"];
+/** Pages anyone can see; everything else needs a session. */
+export const PUBLIC_PAGES = ["/", ...AUTH_PAGES];
 /** Dispatched on window when the API says the session is gone (AuthProvider listens). */
 export const SESSION_EXPIRED = "archaeologist:session-expired";
 

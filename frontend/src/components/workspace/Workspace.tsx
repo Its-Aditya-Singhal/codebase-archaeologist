@@ -143,7 +143,7 @@ export function Workspace({ repoId }: { repoId: number }) {
   return (
     <div className="flex h-full flex-col bg-ink-950">
       <header className="flex h-11 shrink-0 items-center gap-3 border-b border-ink-700 bg-ink-900 px-3">
-        <Link href="/" className="rounded p-1 text-faint hover:bg-ink-800 hover:text-parchment" title="All sites">
+        <Link href="/app" className="rounded p-1 text-faint hover:bg-ink-800 hover:text-parchment" title="All sites">
           <ArrowLeft className="size-4" />
         </Link>
         <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-lamp">Archaeologist</span>

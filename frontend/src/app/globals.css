@@ -11,7 +11,7 @@
   --ink-600: #343a46;
   --parchment: #e9e4d8;
   --muted: #8d919b;
-  --faint: #5d626d;
+  --faint: #737884; /* 4.5:1 on ink-950 */
   --lamp: #e9a23b;
   --lamp-soft: rgba(233, 162, 59, 0.14);
   --evidence: #5fb8a4;
@@ -42,6 +42,27 @@
 html,
 body {
   height: 100%;
+}
+
+html {
+  scroll-padding-top: 6rem;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--lamp);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+button:not(:disabled),
+[role="button"],
+summary {
+  cursor: pointer;
 }
 
 body {
@@ -134,4 +155,177 @@ body {
   color: var(--lamp);
   animation: caret 1s step-end infinite;
   margin-left: 2px;
+}
+
+/* ------------------------------------------------------------------ motion */
+
+/* Grid that fades out towards the edges (hero, CTA). */
+.grid-fade {
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 35%, #000 20%, transparent 75%);
+}
+
+/* Paper-grain noise over dark surfaces. */
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+@keyframes marquee {
+  to {
+    transform: translateX(-50%);
+  }
+}
+.marquee {
+  animation: marquee 45s linear infinite;
+}
+.marquee-reverse {
+  animation-direction: reverse;
+}
+.marquee-wrap:hover .marquee {
+  animation-play-state: paused;
+}
+
+/* Light sweep across a button on hover. */
+@keyframes shimmer {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(120%);
+  }
+}
+.btn-shimmer {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+.btn-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.5) 50%, transparent 70%);
+  transform: translateX(-120%);
+}
+.btn-shimmer:hover::after {
+  animation: shimmer 0.9s ease-out;
+}
+
+/* Dust motes drifting up through the lamp light. */
+@keyframes dust {
+  0% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translate3d(24px, -140px, 0);
+    opacity: 0;
+  }
+}
+.dust {
+  animation: dust var(--d, 10s) linear var(--delay, 0s) infinite;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(233, 162, 59, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 9px rgba(233, 162, 59, 0);
+  }
+}
+.pulse-dot {
+  animation: pulse-ring 2s ease-out infinite;
+}
+
+@keyframes breathe {
+  50% {
+    opacity: 0.6;
+    transform: scale(1.06);
+  }
+}
+.breathe {
+  animation: breathe 7s ease-in-out infinite;
+}
+
+/* Indexing progress: moving stripes. */
+@keyframes stripes {
+  to {
+    background-position: 24px 0;
+  }
+}
+.progress-stripes {
+  background-image: linear-gradient(
+    45deg,
+    rgba(11, 12, 14, 0.25) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(11, 12, 14, 0.25) 50%,
+    rgba(11, 12, 14, 0.25) 75%,
+    transparent 75%
+  );
+  background-size: 24px 24px;
+  animation: stripes 0.8s linear infinite;
+}
+
+/* Card whose border and surface light up under the cursor (--mx/--my set in JS). */
+.glow-card {
+  position: relative;
+  --mx: 50%;
+  --my: 50%;
+}
+.glow-card::before,
+.glow-card::after {
+  content: "";
+  position: absolute;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease-out;
+}
+.glow-card::before {
+  inset: -1px;
+  padding: 1px;
+  background: radial-gradient(360px circle at var(--mx) var(--my), rgba(233, 162, 59, 0.7), transparent 45%);
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+.glow-card::after {
+  inset: 0;
+  background: radial-gradient(520px circle at var(--mx) var(--my), rgba(233, 162, 59, 0.07), transparent 45%);
+}
+.glow-card:hover::before,
+.glow-card:hover::after,
+.glow-card:focus-within::before {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .marquee,
+  .dust,
+  .breathe,
+  .pulse-dot,
+  .progress-stripes {
+    animation: none !important;
+  }
+  .dust {
+    display: none;
+  }
 }

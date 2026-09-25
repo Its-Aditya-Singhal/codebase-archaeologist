@@ -46,7 +46,7 @@ and cites every source, so the developer can check it.
 
 | Layer | Choice | Why |
 |---|---|---|
-| Frontend | Next.js 16, React 19, TypeScript, Tailwind 4, Shiki | App Router workspace UI, fast syntax highlighting |
+| Frontend | Next.js 16, React 19, TypeScript, Tailwind 4, Shiki, Motion | App Router workspace UI, fast syntax highlighting |
 | API | Python 3.13, FastAPI | Ingestion/parsing/ML ecosystem (tree-sitter, local embeddings) lives in Python |
 | Data | PostgreSQL 17 + pgvector (HNSW), `tsvector` | One store for relational data, vectors, full-text and the graph (node/edge tables) |
 | Embeddings | `BAAI/bge-small-en-v1.5` via fastembed (local) | Indexing needs no API key; swappable behind `Embedder` |
@@ -164,8 +164,10 @@ backend/app/
   migrations/  numbered SQL, applied in order on startup
   embeddings/  Embedder protocol + local fastembed
 frontend/src/
-  app/                  landing (sites) + /repos/[id] workspace + /login, /signup
-  components/auth       AuthProvider (session gate) · AuthForm · UserMenu
+  app/                  / landing · /app sites · /repos/[id] workspace · /login, /signup
+  components/landing    Hero (live demo) · Strata · EvidenceChain · Sections (scroll-driven, motion)
+  components/motion     Reveal · Stagger · CountUp · GlowCard (respect prefers-reduced-motion)
+  components/auth       AuthProvider (session gate) · AuthForm · AuthArt · UserMenu
   components/workspace  FileExplorer · CodeViewer · Investigation
   components/history    TimelinePanel · CommitView/RecordView · Diff and PR/issue chips
   components/graph      RelationsPanel · NeighborhoodGraph · ImpactView
