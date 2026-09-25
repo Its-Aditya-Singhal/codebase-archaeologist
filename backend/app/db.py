@@ -20,14 +20,44 @@ def _configure(conn: psycopg.Connection) -> None:
     conn.commit()
 
 
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+_MIGRATION_LOCK = 7_300_451  # pg advisory lock key: one migrator at a time
+
+
+def migrate(database_url: str) -> list[str]:
+    """Apply pending migrations (app/migrations/NNNN_name.sql) in order, each in
+    its own transaction, recording them in `schema_migrations`. Returns the
+    versions applied. Migrations are written to be idempotent, so a database
+    created before this table existed is adopted safely."""
+    dim = str(get_settings().embedding_dim)
+    applied: list[str] = []
+    with psycopg.connect(database_url, autocommit=True) as conn:
+        conn.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_LOCK,))
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+                                version TEXT PRIMARY KEY,
+                                applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
+            done = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
+            for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                version = path.stem
+                if version in done:
+                    continue
+                sql = path.read_text().replace("{{EMBEDDING_DIM}}", dim)
+                with conn.transaction():
+                    conn.execute(sql)
+                    conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)",
+                                 (version,))
+                applied.append(version)
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (_MIGRATION_LOCK,))
+    return applied
+
+
 def init_db() -> None:
-    """Create the extension/tables, then open the pool."""
+    """Apply pending migrations, then open the pool."""
     global _pool
     settings = get_settings()
-    schema = (Path(__file__).parent / "schema.sql").read_text()
-    schema = schema.replace("{{EMBEDDING_DIM}}", str(settings.embedding_dim))
-    with psycopg.connect(settings.database_url, autocommit=True) as conn:
-        conn.execute(schema)
+    migrate(settings.database_url)
     _pool = ConnectionPool(
         settings.database_url,
         min_size=1,

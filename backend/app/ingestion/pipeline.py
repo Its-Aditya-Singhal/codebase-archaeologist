@@ -14,11 +14,14 @@ from app.history.ingest import ingest_history
 from app.ingestion.chunker import Chunk, chunk_file, detect_language
 from app.ingestion.filters import decode_text, should_index_path
 from app.ingestion.repo_source import head_info, parse_repo_ref, sync_checkout, tracked_files
-from app.ingestion.store import ChunkRow, delete_chunks, store_chunks
+from app.ingestion.store import ChunkRow, sync_chunks
 
 log = logging.getLogger(__name__)
 
 CODE_TYPES = ("code", "doc")
+# Bump when chunking or embedding-text construction changes, so the next index
+# re-embeds everything instead of reusing vectors computed the old way.
+INDEX_VERSION = 2
 
 
 @dataclass
@@ -34,7 +37,13 @@ def _set_status(repo_id: int, status: str, **fields) -> None:
     sets = ["status = %(status)s"]
     params = {"id": repo_id, "status": status}
     for key, value in fields.items():
-        sets.append(f"{key} = %({key})s")
+        if key == "progress" and status != "failed":
+            # Keep the resume counter (see main._resume_interrupted) across updates.
+            sets.append("progress = CASE WHEN progress ? 'resumes' THEN %(progress)s || "
+                        "jsonb_build_object('resumes', progress->'resumes') "
+                        "ELSE %(progress)s END")
+        else:
+            sets.append(f"{key} = %({key})s")
         params[key] = Jsonb(value) if isinstance(value, dict) else value
     with connection() as conn:
         conn.execute(f"UPDATE repositories SET {', '.join(sets)} WHERE id = %(id)s", params)
@@ -92,15 +101,27 @@ def ingest_repository(repo_id: int) -> None:
         _set_status(repo_id, "embedding", progress={
             "step": "Embedding code and docs", "done": 0, "total": total_chunks})
 
+        # Files are upserted in place (chunks reference them); files that left
+        # the repository are deleted, which cascades to their chunks.
         with connection() as conn, conn.transaction():
-            delete_chunks(repo_id, CODE_TYPES)
-            conn.execute("DELETE FROM files WHERE repo_id = %s", (repo_id,))
+            prev = conn.execute("SELECT stats FROM repositories WHERE id = %s",
+                                (repo_id,)).fetchone()["stats"] or {}
+            index_key = {"version": INDEX_VERSION, "embedding_model": settings.embedding_model}
+            if prev.get("index_key") != index_key:
+                conn.execute("DELETE FROM chunks WHERE repo_id = %s", (repo_id,))
+            conn.execute("DELETE FROM files WHERE repo_id = %s AND NOT (path = ANY(%s))",
+                         (repo_id, [f.path for f in parsed]))
             file_ids: dict[str, int] = {}
             for f in parsed:
                 file_ids[f.path] = conn.execute(
                     """INSERT INTO files (repo_id, path, language, size_bytes, line_count,
                                           blob_sha, content)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (repo_id, path) DO UPDATE SET
+                           language = EXCLUDED.language, size_bytes = EXCLUDED.size_bytes,
+                           line_count = EXCLUDED.line_count, blob_sha = EXCLUDED.blob_sha,
+                           content = EXCLUDED.content
+                       RETURNING id""",
                     (repo_id, f.path, f.language, len(f.content.encode()),
                      f.content.count("\n") + 1, f.blob_sha, f.content),
                 ).fetchone()["id"]
@@ -116,9 +137,9 @@ def ingest_repository(repo_id: int) -> None:
             )
             for f in parsed for c in f.chunks
         ]
-        store_chunks(repo_id, rows, lambda done, total: _set_status(
+        sync = sync_chunks(repo_id, CODE_TYPES, rows, lambda done, total: _set_status(
             repo_id, "embedding",
-            progress={"step": "Embedding code and docs", "done": done, "total": total}))
+            progress={"step": "Embedding new and changed code", "done": done, "total": total}))
 
         languages = Counter(f.language or "other" for f in parsed)
         stats = {
@@ -127,6 +148,9 @@ def ingest_repository(repo_id: int) -> None:
             "chunks": total_chunks,
             "symbols": sum(1 for f in parsed for c in f.chunks if c.symbol_name),
             "languages": dict(languages.most_common(12)),
+            "index_key": index_key,
+            "index": {"reused": sync.reused, "embedded": sync.embedded,
+                      "deleted": sync.deleted},
         }
 
         # History is best-effort: a GitHub outage or rate limit must not make

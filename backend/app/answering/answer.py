@@ -22,6 +22,7 @@ import httpx
 from app.answering.briefing import build_briefing
 from app.answering.prompts import SYSTEM_PROMPT, format_evidence
 from app.config import get_settings
+from app.investigations import PriorTurn
 from app.retrieval.hybrid import Focus, RetrievedChunk
 
 log = logging.getLogger(__name__)
@@ -91,9 +92,27 @@ def indexed_sources(stats: dict) -> list[str]:
     return sources
 
 
+FOLLOW_UP_NOTE = (
+    "This is a follow-up in an ongoing investigation; the earlier questions and answers above "
+    "are context. Their citations referred to earlier evidence: ground and cite this answer "
+    "only in the evidence below.\n\n")
+
+
+def _messages(prior: list[PriorTurn], user_content: str) -> list[dict]:
+    """Earlier turns as alternating user/assistant messages, then this turn."""
+    messages: list[dict] = []
+    for t in prior:
+        messages += [{"role": "user", "content": t.question},
+                     {"role": "assistant", "content": t.answer}]
+    note = FOLLOW_UP_NOTE if prior else ""
+    return messages + [{"role": "user", "content": note + user_content}]
+
+
 def stream_answer(question: str, repo_name: str, chunks: list[RetrievedChunk],
-                  focus: Focus | None, sources: list[str]) -> Iterator[dict]:
+                  focus: Focus | None, sources: list[str],
+                  prior: list[PriorTurn] | None = None) -> Iterator[dict]:
     """Yield `{"event": ..., "data": ...}` dicts: delta*, then done | error."""
+    prior = prior or []
     if not chunks:
         yield {"event": "error", "data": {
             "message": "No evidence was retrieved for this question, so there is nothing to "
@@ -107,9 +126,9 @@ def stream_answer(question: str, repo_name: str, chunks: list[RetrievedChunk],
         return
     focus_desc = describe_focus(focus, chunks)
     if provider == "ollama":
-        yield from _stream_ollama(question, repo_name, chunks, focus_desc, sources)
+        yield from _stream_ollama(question, repo_name, chunks, focus_desc, sources, prior)
     else:
-        yield from _stream_claude(question, repo_name, chunks, focus_desc, sources)
+        yield from _stream_claude(question, repo_name, chunks, focus_desc, sources, prior)
 
 
 # ------------------------------------------------------------------ local model
@@ -133,16 +152,15 @@ def _fit_local(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
 
 
 def _stream_ollama(question: str, repo_name: str, chunks: list[RetrievedChunk],
-                   focus_desc: str | None, sources: list[str]) -> Iterator[dict]:
+                   focus_desc: str | None, sources: list[str],
+                   prior: list[PriorTurn]) -> Iterator[dict]:
     settings = get_settings()
     evidence = format_evidence(_fit_local(chunks), repo_name, focus_desc, sources)
     body = {
         "model": settings.ollama_model,
         "stream": True,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"{evidence}\n\n<question>{question}</question>"},
-        ],
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *_messages(
+            prior, f"{evidence}\n\n<question>{question}</question>")],
         "options": {"num_ctx": settings.ollama_num_ctx, "temperature": 0.2},
     }
     final: dict = {}
@@ -182,7 +200,8 @@ def _stream_ollama(question: str, repo_name: str, chunks: list[RetrievedChunk],
 
 
 def _stream_claude(question: str, repo_name: str, chunks: list[RetrievedChunk],
-                   focus_desc: str | None, sources: list[str]) -> Iterator[dict]:
+                   focus_desc: str | None, sources: list[str],
+                   prior: list[PriorTurn]) -> Iterator[dict]:
     settings = get_settings()
     evidence = format_evidence(chunks, repo_name, focus_desc, sources)
     user_content = f"{evidence}\n\n<question>{question}</question>"
@@ -192,7 +211,7 @@ def _stream_claude(question: str, repo_name: str, chunks: list[RetrievedChunk],
             model=settings.answer_model,
             max_tokens=settings.answer_max_tokens,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
+            messages=_messages(prior, user_content),
             thinking={"type": "adaptive"},
             output_config={"effort": settings.answer_effort},
             # On a policy decline, re-run server-side on Anthropic's recommended

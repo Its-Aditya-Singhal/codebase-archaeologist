@@ -3,23 +3,29 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app import investigations
+from app.answering.agent import agent_model, investigate
 from app.answering.answer import indexed_sources, stream_answer
 from app.config import get_settings
 from app.db import close_db, connection, init_db
+from app.graph import explore
 from app.graph.build import rebuild_graph
 from app.graph.query import impact, neighborhood
+from app.history.evolution import evolution
 from app.history.timeline import commit_detail, timeline
 from app.ingestion.pipeline import ingest_repository
 from app.ingestion.repo_source import RepoSourceError, parse_repo_ref
 from app.retrieval.hybrid import Focus, search
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger(__name__)
 
 # Ingestion is CPU/IO heavy and long-running; keep it off the request threads.
 _ingest_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ingest")
@@ -30,13 +36,33 @@ IN_PROGRESS = ("queued", "cloning", "parsing", "embedding", "history", "graph")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    with connection() as conn:
-        conn.execute(
-            "UPDATE repositories SET status = 'failed', error = 'Interrupted by server restart' "
-            "WHERE status = ANY(%s)", (list(IN_PROGRESS),))
+    _resume_interrupted()
     yield
     _ingest_pool.shutdown(wait=False, cancel_futures=True)
     close_db()
+
+
+MAX_RESUMES = 2
+
+
+def _resume_interrupted() -> None:
+    """Indexing that a restart cut short is started again (cheaply, since
+    re-indexing is incremental). A job interrupted repeatedly is marked failed
+    rather than retried forever: it may be what is crashing the server."""
+    with connection() as conn:
+        rows = conn.execute(
+            """SELECT id, coalesce((progress->>'resumes')::int, 0) AS resumes
+               FROM repositories WHERE status = ANY(%s)""", (list(IN_PROGRESS),)).fetchall()
+    for r in rows:
+        if r["resumes"] >= MAX_RESUMES:
+            with connection() as conn:
+                conn.execute(
+                    "UPDATE repositories SET status = 'failed', progress = '{}'::jsonb, "
+                    "error = 'Indexing was interrupted repeatedly; re-index to retry' "
+                    "WHERE id = %s", (r["id"],))
+            continue
+        log.info("Resuming interrupted indexing of repo %s", r["id"])
+        _start_ingest(r["id"], resumes=r["resumes"] + 1)
 
 
 app = FastAPI(title="Codebase Archaeologist", lifespan=lifespan)
@@ -92,10 +118,11 @@ def create_repo(body: CreateRepo):
     return _get_repo(row["id"])
 
 
-def _start_ingest(repo_id: int) -> None:
+def _start_ingest(repo_id: int, resumes: int = 0) -> None:
     with connection() as conn:
-        conn.execute("UPDATE repositories SET status = 'queued', error = NULL WHERE id = %s",
-                     (repo_id,))
+        conn.execute("UPDATE repositories SET status = 'queued', error = NULL, progress = %s "
+                     "WHERE id = %s", (json.dumps({"resumes": resumes} if resumes else {}),
+                                       repo_id))
     _ingest_pool.submit(ingest_repository, repo_id)
 
 
@@ -182,6 +209,16 @@ def get_history(repo_id: int, path: str = Query(...), start_line: int | None = N
     return timeline(repo, path, start_line, end_line)
 
 
+@app.get("/api/repos/{repo_id}/evolution")
+def get_evolution(repo_id: int, path: str = Query(...), start_line: int = Query(..., ge=1),
+                  end_line: int | None = None):
+    """The code's versions over time, oldest first: each commit that changed it,
+    the code as it was after that commit, the diff, and the PR/issues behind it.
+    A selection inside a function is widened to the whole function."""
+    repo = _repo_with_checkout(repo_id)
+    return evolution(repo, path, start_line, end_line or start_line)
+
+
 @app.get("/api/repos/{repo_id}/commits/{sha}")
 def get_commit(repo_id: int, sha: str, path: str | None = None):
     if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
@@ -219,6 +256,47 @@ def get_impact(repo_id: int, path: str = Query(...), start_line: int | None = No
     result = impact(repo, path, start_line, end_line)
     if result is None:
         raise HTTPException(404, "Nothing in the graph at that location")
+    return result
+
+
+@app.get("/api/repos/{repo_id}/graph/overview")
+def graph_overview(repo_id: int, level: str = Query("file", pattern="^(file|dir)$"),
+                   depth: int = Query(2, ge=1, le=6), limit: int = Query(150, ge=10, le=1000),
+                   tests: bool = True, packages: bool = True):
+    """The repository's architecture: files (or directories, `depth` segments
+    deep) with dependency edges aggregated from imports, calls and inheritance,
+    plus the external packages they use."""
+    _repo_with_graph(repo_id)
+    return explore.overview(repo_id, level, depth, limit, tests, packages)
+
+
+@app.get("/api/repos/{repo_id}/graph/search")
+def graph_search(repo_id: int, q: str = Query(..., min_length=1),
+                 kinds: Annotated[list[str] | None, Query()] = None,
+                 limit: int = Query(20, ge=1, le=100)):
+    _repo_with_graph(repo_id)
+    return explore.search(repo_id, q, kinds, limit)
+
+
+@app.get("/api/repos/{repo_id}/graph/nodes/{node_id}")
+def graph_node(repo_id: int, node_id: int):
+    detail = explore.node_detail(repo_id, node_id)
+    if detail is None:
+        raise HTTPException(404, "Node not found")
+    return detail
+
+
+@app.get("/api/repos/{repo_id}/graph/nodes/{node_id}/expand")
+def graph_expand(repo_id: int, node_id: int,
+                 kinds: Annotated[list[str] | None, Query()] = None,
+                 direction: str = Query("both", pattern="^(in|out|both)$"),
+                 since: str | None = None, until: str | None = None,
+                 limit: int = Query(40, ge=1, le=500)):
+    """A node's neighbours along the given edge kinds (all by default), with
+    commits / PRs / issues limited to [since, until] (ISO dates) when given."""
+    result = explore.expand(repo_id, node_id, kinds, direction, since, until, limit)
+    if result is None:
+        raise HTTPException(404, "Node not found")
     return result
 
 
@@ -270,6 +348,10 @@ class AskIn(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     focus: FocusIn | None = None
     limit: int = Field(default=12, ge=1, le=30)
+    # Continue a saved investigation (follow-up); omitted = start a new one.
+    investigation_id: int | None = None
+    # "agent": a model gathers evidence over several tool-using steps first.
+    mode: Literal["answer", "agent"] = "answer"
 
 
 def _ready_repo(repo_id: int) -> dict:
@@ -288,20 +370,104 @@ def search_repo(repo_id: int, body: AskIn):
 
 @app.post("/api/repos/{repo_id}/ask")
 def ask(repo_id: int, body: AskIn):
-    """Server-sent events: `sources` (the evidence, S1..Sn), `delta`* (answer text),
-    then `done` or `error`."""
-    repo = _ready_repo(repo_id)
+    """Server-sent events: `investigation` ({id}), in agent mode `step`* (each tool
+    call and what it found), `sources` (the evidence, S1..Sn), `delta`* (answer
+    text), then `done` or `error`. The turn is saved to the investigation, and
+    earlier turns give a follow-up its context."""
+    repo = {**_ready_repo(repo_id), **_repo_with_checkout(repo_id)}
     focus = Focus(**body.focus.model_dump()) if body.focus else None
+    if body.investigation_id is not None:
+        inv = investigations.get(body.investigation_id, with_turns=False)
+        if inv is None or inv["repo_id"] != repo_id:
+            raise HTTPException(404, "Investigation not found for this repository")
+        inv_id = inv["id"]
+    else:
+        inv_id = investigations.create(repo_id, body.question)
+    prior = investigations.prior_turns(inv_id)
 
     def events():
-        chunks = search(repo_id, body.question, body.limit, focus)
-        yield _sse("sources", [dict(c.to_dict(), ref=f"S{i}") for i, c in enumerate(chunks, 1)])
-        for ev in stream_answer(body.question, repo["name"], chunks, focus,
-                                indexed_sources(repo["stats"])):
-            yield _sse(ev["event"], ev["data"])
+        turn = {"evidence": [], "steps": [], "answer": [], "answered_by": None,
+                "status": "stopped", "error": None}
+        try:
+            yield _sse("investigation", {"id": inv_id, "follow_up": bool(prior)})
+            query = investigations.retrieval_query(body.question, prior)
+            chunks = search(repo_id, query, body.limit, focus, question_only=body.question)
+            if body.mode == "agent":
+                for ev in _agent_steps(repo, body.question, chunks, prior):
+                    if ev["event"] == "pool":
+                        chunks = ev["data"]
+                    else:
+                        turn["steps"].append(ev["data"])
+                        yield _sse("step", ev["data"])
+            turn["evidence"] = [dict(c.to_dict(), ref=f"S{i}") for i, c in enumerate(chunks, 1)]
+            yield _sse("sources", turn["evidence"])
+            for ev in stream_answer(body.question, repo["name"], chunks, focus,
+                                    indexed_sources(repo["stats"]), prior):
+                if ev["event"] == "delta":
+                    turn["answer"].append(ev["data"]["text"])
+                elif ev["event"] == "done":
+                    turn["status"] = "done"
+                    turn["answered_by"] = {"provider": ev["data"].get("provider"),
+                                           "model": ev["data"].get("model")}
+                elif ev["event"] == "error":
+                    turn["status"], turn["error"] = "error", ev["data"]["message"]
+                yield _sse(ev["event"], ev["data"])
+        finally:
+            # Also runs when the client disconnects mid-answer ("stopped").
+            investigations.save_turn(
+                inv_id, body.question, body.focus.model_dump() if body.focus else None,
+                body.mode, json.loads(json.dumps(turn["steps"], default=str)),
+                json.loads(json.dumps(turn["evidence"], default=str)),
+                "".join(turn["answer"]), turn["answered_by"], turn["status"], turn["error"])
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _agent_steps(repo: dict, question: str, seed: list, prior: list):
+    model = agent_model()
+    if model is None:
+        yield {"event": "step", "data": {
+            "n": 1, "tool": None, "input": {}, "added": [],
+            "summary": "Agent mode needs a language model (a local Ollama model or a Claude API "
+                       "key); answered from single-pass retrieval instead."}}
+        return
+    context = "".join(f"<earlier_question>{t.question}</earlier_question>\n" for t in prior)
+    yield from investigate(repo, question, seed, model, context)
+
+
+# ---------------------------------------------------------------- investigations
+
+
+class RenameIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
+@app.get("/api/repos/{repo_id}/investigations")
+def list_investigations(repo_id: int):
+    _get_repo(repo_id)
+    return investigations.list_for_repo(repo_id)
+
+
+@app.get("/api/investigations/{investigation_id}")
+def get_investigation(investigation_id: int):
+    inv = investigations.get(investigation_id)
+    if inv is None:
+        raise HTTPException(404, "Investigation not found")
+    return inv
+
+
+@app.patch("/api/investigations/{investigation_id}")
+def rename_investigation(investigation_id: int, body: RenameIn):
+    if not investigations.rename(investigation_id, body.title):
+        raise HTTPException(404, "Investigation not found")
+    return investigations.get(investigation_id, with_turns=False)
+
+
+@app.delete("/api/investigations/{investigation_id}", status_code=204)
+def delete_investigation(investigation_id: int):
+    if not investigations.delete(investigation_id):
+        raise HTTPException(404, "Investigation not found")
 
 
 def _sse(event: str, data) -> str:

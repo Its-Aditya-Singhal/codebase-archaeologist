@@ -133,21 +133,58 @@ reflection or string-based lookups, and a variable receiver not named after its 
 language server or stack-graphs) would raise precision. Symbol-level `modifies` edges are
 computed on demand with `git log -L` rather than stored.
 
-## Phase 4: investigation experience
+## Phase 4: investigation experience (backend ✅, frontend next)
 
-- Interactive relationship graph (issue → PR → commit → file → function → dependency) with
-  pan/zoom, expand-on-click, and filtering by type and time
-- Evolution view: a function's versions over time with diffs and the PRs that changed it
-- "Case file" investigations: saved, shareable question threads with their evidence
-- Agentic investigations: multi-step tool use (search, blame, open PR, traverse graph) for
-  questions that need several hops, with the evidence trail shown as it is gathered
+The backend for every phase-4 feature is built and tested; what remains is UI.
+
+- **Relationship explorer** (`graph/explore.py`): `GET /graph/overview` (architecture at file
+  or directory level: dependency edges aggregated from imports, calls and inheritance, node
+  size/churn/test share, external packages), `/graph/search`, `/graph/nodes/{id}` (degree per
+  edge kind) and `/graph/nodes/{id}/expand` (neighbours by edge kind and direction, with
+  commits/PRs/issues filtered to a date window). UI to build: pan/zoom canvas with
+  expand-on-click and type/time filters.
+- **Evolution** (`history/evolution.py`, `GET /evolution`): a definition's versions, oldest
+  first. The `git log -L` hunk header gives the range's position at each commit; slicing the
+  file at that commit reconstructs the code as it was, alongside the diff and the PR/issues.
+  A selection inside a function widens to the function. UI to build: version stepper.
+- **Case files and follow-ups** (`investigations.py`): every `/ask` turn is stored with focus,
+  evidence, answer and writer; `investigation_id` continues a thread. A short or referential
+  follow-up ("who calls it?") borrows the previous question's subject for retrieval, and the
+  writer receives the earlier turns (citations stripped, since they referred to old evidence).
+  Endpoints to list, open, rename and delete. UI to build: thread list, reopen, follow-ups.
+- **Agentic investigations** (`answering/agent.py`, `/ask` with `mode: "agent"`): the model
+  first gathers evidence with seven tools (search, read_code, find_symbol, code_history,
+  relations, impact, open_record) for up to 6 rounds; each tool result joins one numbered
+  evidence pool and is streamed as a `step` event; then the normal writer answers from the
+  pool with the same citation contract. Works with Claude or a local Ollama model; without a
+  model it falls back to single-pass retrieval and says so. Arguments are validated and
+  repeated calls refused. UI to build: live evidence trail.
+
+Also completed alongside:
+
+- **Discussions**: PR conversation and review comments (with the file they were left on)
+  and issue comments, fetched within a request budget, threads behind code first, resumable,
+  and re-fetched only when the PR/issue changed. They become part of the PR/issue evidence.
+  PR comment counts come free from the issues listing, so silent PRs cost no requests.
+- **Incremental re-indexing**: chunks are matched by the hash of their embedding input; only
+  new or changed text is embedded (rq: 7.5 min full → 12 s re-index with nothing changed).
+  Changing the chunker (`INDEX_VERSION`) or embedding model forces a full rebuild.
+- **Durable indexing**: indexing interrupted by a restart resumes on startup (cheap, since it
+  is incremental); a job interrupted twice is marked failed instead of looping.
+- **Migrations**: versioned SQL in `app/migrations`, applied in order under an advisory lock
+  and recorded in `schema_migrations`.
+- **Free answering**: evidence briefing (no model) and local Ollama models besides Claude.
+- **Integration tests**: the API end to end against a throwaway `archaeologist_test`
+  database and a generated git repository.
 
 ## Known limitations / next improvements
 
 - Embedding runs on CPU (~20 chunks/s). Fine for small/medium repos; a hosted code-embedding
   model or GPU would be the upgrade path (swap via `Embedder`).
-- Re-index rebuilds everything; incremental re-index by `blob_sha` is straightforward to add.
-- Single-turn questions (no follow-up context yet).
-- Ingestion runs in-process on a thread pool; move to a job queue once there are many repos.
-- Without `GITHUB_TOKEN`, large repos need several re-indexes (an hour apart) to fetch all
-  PRs and issues; the UI flags a partial sync.
+- Ingestion runs in-process on a thread pool (now resumable); a separate worker process or
+  job queue is the step up once many repositories are indexed concurrently.
+- Without `GITHUB_TOKEN` (60 requests/hour), large repos need several re-indexes an hour apart
+  to fetch all PRs, issues and discussions; everything resumes where it stopped.
+- The Claude answer/agent paths are implemented against the documented SDK but have not been
+  run against the live API in this project (no key); the briefing and data paths are tested.
+- No authentication: the API is meant for local use.

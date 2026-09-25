@@ -528,11 +528,11 @@ def _add_history(repo_id: int, g: Graph) -> None:
                FROM commit_files cf JOIN commits c ON c.id = cf.commit_id
                WHERE cf.repo_id = %s""", (repo_id,)).fetchall()
         prs = conn.execute(
-            """SELECT number, title, state, author, url, merged_at FROM pull_requests
-               WHERE repo_id = %s""", (repo_id,)).fetchall()
+            """SELECT number, title, state, author, url, created_at, merged_at
+               FROM pull_requests WHERE repo_id = %s""", (repo_id,)).fetchall()
         issues = conn.execute(
-            "SELECT number, title, state, author, url FROM issues WHERE repo_id = %s",
-            (repo_id,)).fetchall()
+            """SELECT number, title, state, author, url, created_at FROM issues
+               WHERE repo_id = %s""", (repo_id,)).fetchall()
         links = conn.execute(
             "SELECT src_type, src_key, dst_type, dst_key, kind FROM links WHERE repo_id = %s",
             (repo_id,)).fetchall()
@@ -560,13 +560,13 @@ def _add_history(repo_id: int, g: Graph) -> None:
         g.node("pull_request", str(p["number"]), f"#{p['number']} {p['title']}",
                chunk_id=chunk_ids.get(("pull_request", str(p["number"]))),
                data={"number": p["number"], "title": p["title"], "state": p["state"],
-                     "author": p["author"], "url": p["url"],
-                     "merged_at": p["merged_at"].isoformat() if p["merged_at"] else None})
+                     "author": p["author"], "url": p["url"], "date": _iso(p["created_at"]),
+                     "merged_at": _iso(p["merged_at"])})
     for i in issues:
         g.node("issue", str(i["number"]), f"#{i['number']} {i['title']}",
                chunk_id=chunk_ids.get(("issue", str(i["number"]))),
                data={"number": i["number"], "title": i["title"], "state": i["state"],
-                     "author": i["author"], "url": i["url"]})
+                     "author": i["author"], "url": i["url"], "date": _iso(i["created_at"])})
     for lk in links:
         src, dst = (lk["src_type"], lk["src_key"]), (lk["dst_type"], lk["dst_key"])
         for kind, key in (src, dst):
@@ -575,6 +575,10 @@ def _add_history(repo_id: int, g: Graph) -> None:
                 g.node(kind, key, f"#{key}", data={"number": int(key), "fetched": False})
         if src in g.nodes and dst in g.nodes:
             g.edge(src, lk["kind"], dst)
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value else None
 
 
 # --------------------------------------------------------------------- persist

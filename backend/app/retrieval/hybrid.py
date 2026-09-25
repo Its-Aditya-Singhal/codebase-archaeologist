@@ -71,7 +71,11 @@ _COLUMNS = """id, source_type, path, language, symbol_kind, symbol_name,
 
 
 def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = None,
-           history: bool = True) -> list[RetrievedChunk]:
+           history: bool = True, question_only: str | None = None) -> list[RetrievedChunk]:
+    """`question` is what is searched for (for a follow-up, it includes the
+    previous question); `question_only`, when given, is the user's actual
+    question, used to judge intent (e.g. whether impact analysis is wanted)."""
+    asked = question_only or question
     scores: dict[int, float] = {}
     matched: dict[int, list[str]] = {}
     rows_by_id: dict[int, dict] = {}
@@ -154,11 +158,11 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
     # 5. Graph neighbours of the code under investigation: what calls it, what it
     # calls, its base classes. Falls back to a lexical search for mentions of the
     # symbol when the graph has nothing (unsupported language, no graph yet).
-    anchor = _code_anchor(focus_rows, rows_by_id, matched, scores)
+    where = _anchor_location(repo_id, focus, idents,
+                             _code_anchor(focus_rows, rows_by_id, matched, scores))
     graph_target = None
-    if anchor is not None:
-        graph_target, related = related_code(repo_id, anchor["path"], anchor["start_line"],
-                                             anchor["end_line"])
+    if where is not None and where[1] is not None:
+        graph_target, related = related_code(repo_id, *where)
         if related:
             _add_graph_neighbours(related, graph_target, pinned, add, rows_by_id, matched)
         elif focus_symbols:
@@ -166,7 +170,7 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
 
     # 6. Impact analysis for "what would break / who uses this" questions.
     impact_chunk = None
-    if graph_target is not None and IMPACT_QUESTION.search(question):
+    if graph_target is not None and IMPACT_QUESTION.search(asked):
         text = describe_impact({"id": repo_id}, graph_target["path"],
                                graph_target["start_line"] if graph_target["kind"] == "symbol"
                                else None, graph_target["end_line"])
@@ -181,7 +185,6 @@ def search(repo_id: int, question: str, limit: int = 12, focus: Focus | None = N
     # 7. Provenance of the code under investigation.
     history_items: list[ProvenanceItem] = []
     if history and repo and repo["local_path"] and repo["head_sha"]:
-        where = _provenance_anchor(focus, anchor)
         if where and where[1] is not None:
             history_items = range_provenance(repo_id, repo["local_path"], repo["head_sha"],
                                              where[0], where[1], where[2])
@@ -295,15 +298,29 @@ def _expand_history_hits(repo_id: int, results: list[RetrievedChunk], max_added:
     return out
 
 
-def _provenance_anchor(focus: Focus | None, anchor: dict | None
-                       ) -> tuple[str, int | None, int | None] | None:
-    """The code whose history to pull: the user's selection (a range or a whole
-    file), else the code the question names."""
+def _anchor_location(repo_id: int, focus: Focus | None, idents: list[str],
+                     anchor_chunk: dict | None) -> tuple[str, int | None, int | None] | None:
+    """The code under investigation, for graph expansion and line history: the
+    selection (a range or a whole file); else the definition the question names,
+    resolved in the graph, which is per definition where chunks are not (a small
+    class is one chunk, its methods are separate nodes); else the best-scoring
+    named chunk."""
     if focus is not None:
         return focus.path, focus.start_line, focus.end_line or focus.start_line
-    if anchor is None:
-        return None
-    return anchor["path"], anchor["start_line"], anchor["end_line"]
+    if idents:
+        with connection() as conn:
+            node = conn.execute(
+                """SELECT path, start_line, end_line FROM graph_nodes
+                   WHERE repo_id = %(r)s AND kind = 'symbol'
+                     AND (lower(label) = ANY(%(i)s)
+                          OR lower(regexp_replace(label, '^.*[.:]', '')) = ANY(%(i)s))
+                   ORDER BY (lower(label) = ANY(%(i)s)) DESC, end_line - start_line DESC
+                   LIMIT 1""", {"r": repo_id, "i": idents}).fetchone()
+        if node is not None:
+            return node["path"], node["start_line"], node["end_line"]
+    if anchor_chunk is not None:
+        return anchor_chunk["path"], anchor_chunk["start_line"], anchor_chunk["end_line"]
+    return None
 
 
 def _overlaps_selected(row: dict, selected: list[RetrievedChunk]) -> bool:

@@ -46,6 +46,8 @@ class FetchResult:
     state: SyncState = field(default_factory=SyncState)
     complete: bool = True
     note: str | None = None
+    # From /issues: conversation comment counts of the pull requests it listed.
+    pr_comment_counts: dict[int, int] = field(default_factory=dict)
 
 
 def _client() -> httpx.Client:
@@ -140,6 +142,89 @@ def fetch_pull_requests(owner: str, name: str, state: SyncState) -> FetchResult:
 
 
 def fetch_issues(owner: str, name: str, state: SyncState) -> FetchResult:
-    # The issues endpoint also returns pull requests; those come from /pulls.
-    return _crawl(f"/repos/{owner}/{name}/issues", state,
-                  keep=lambda item: "pull_request" not in item)
+    # The issues endpoint also returns pull requests. Their details come from
+    # /pulls, but their comment counts are only here, so they are kept aside.
+    result = _crawl(f"/repos/{owner}/{name}/issues", state)
+    result.pr_comment_counts = {i["number"]: i.get("comments", 0)
+                                for i in result.items if "pull_request" in i}
+    result.items = [i for i in result.items if "pull_request" not in i]
+    return result
+
+
+# ------------------------------------------------------------------ discussions
+
+
+@dataclass
+class CommentTarget:
+    parent_type: str  # pull_request | issue
+    number: int
+    conversation: bool = True  # /issues/{n}/comments (PRs have these too)
+    review: bool = False  # /pulls/{n}/comments: comments on diff lines
+
+    @property
+    def key(self) -> str:
+        return f"{self.parent_type}:{self.number}"
+
+
+@dataclass
+class CommentsResult:
+    items: list[dict] = field(default_factory=list)
+    done: list[str] = field(default_factory=list)  # target keys fetched completely
+    note: str | None = None
+
+
+def fetch_comments(owner: str, name: str, targets: list[CommentTarget], max_requests: int
+                   ) -> CommentsResult:
+    """Discussion threads for the given PRs/issues, within a request budget.
+    Stops early (with a note) on the rate limit; unfinished targets are simply
+    not marked done, so the next run picks them up."""
+    result = CommentsResult()
+    used = 0
+    with _client() as client:
+        for t in targets:
+            urls = []
+            if t.conversation:
+                urls.append(("conversation", f"/repos/{owner}/{name}/issues/{t.number}/comments"))
+            if t.review:
+                urls.append(("review", f"/repos/{owner}/{name}/pulls/{t.number}/comments"))
+            items: list[dict] = []
+            for kind, url in urls:
+                params: dict | None = {"per_page": 100}
+                for _ in range(3):  # at most 300 comments per thread
+                    if used >= max_requests:
+                        result.note = f"comment budget of {max_requests} requests used"
+                        result.items += items
+                        return result
+                    try:
+                        resp = _get_with_retry(client, url, params)
+                    except httpx.HTTPError as exc:
+                        result.note = f"network error: {exc}"
+                        result.items += items
+                        return result
+                    used += 1
+                    remaining = int(resp.headers.get("x-ratelimit-remaining", "1000"))
+                    if resp.status_code in (403, 429) and remaining == 0:
+                        result.note = _rate_note(resp)
+                        result.items += items
+                        return result
+                    if resp.status_code >= 400:
+                        break  # deleted / inaccessible thread: skip it
+                    items += [_comment(c, t, kind) for c in resp.json()]
+                    nxt = resp.links.get("next", {}).get("url")
+                    if not nxt:
+                        break
+                    url, params = nxt, None
+                    if remaining <= MIN_REMAINING:
+                        result.note = _rate_note(resp)
+                        result.items += items
+                        return result
+            result.items += items
+            result.done.append(t.key)
+    return result
+
+
+def _comment(c: dict, t: CommentTarget, kind: str) -> dict:
+    return {"comment_id": c["id"], "parent_type": t.parent_type, "parent_number": t.number,
+            "kind": kind, "author": (c.get("user") or {}).get("login"),
+            "body": c.get("body") or "", "path": c.get("path"),
+            "created_at": c.get("created_at"), "url": c.get("html_url")}

@@ -33,7 +33,10 @@ name, or with confidence below 1, are probable rather than certain, so say "like
 dispatch, reflection, callbacks passed as values and string-based lookups are invisible to \
 it, so a missing caller is not proof that nothing calls the code. Co-change counts come from \
 commit history and show coupling that static analysis cannot.
-- Rationale stated in a PR description, issue or commit message is evidence; quote or \
+- Rationale stated in a PR description, issue, commit message or discussion is evidence; a \
+pull request or issue source may end with a "Discussion:" section of its comments (review \
+comments name the file they were left on), which often records why an approach was chosen \
+or rejected. Attribute such statements to their author; quote or \
 paraphrase it and cite it. If no history source explains the motivation, say so, and explain \
 what the code, docs and diffs do reveal about intent (comments, naming, configuration, usage).
 - When history evidence is missing entirely, say which history would answer the question \

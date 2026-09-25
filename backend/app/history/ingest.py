@@ -16,15 +16,24 @@ from psycopg.types.json import Jsonb
 from app.config import get_settings
 from app.db import connection
 from app.history.git_log import CommitInfo, commits_in_merge, read_commits
-from app.history.github import FetchResult, SyncState, fetch_issues, fetch_pull_requests
+from app.history.github import (
+    CommentTarget,
+    FetchResult,
+    SyncState,
+    fetch_comments,
+    fetch_issues,
+    fetch_pull_requests,
+)
 from app.history.links import pr_number_from_commit, references
 from app.ingestion.repo_source import RepoSourceError, git
-from app.ingestion.store import ChunkRow, delete_chunks, store_chunks
+from app.ingestion.store import ChunkRow, sync_chunks
 
 log = logging.getLogger(__name__)
 
 HISTORY_TYPES = ("commit", "pull_request", "issue")
 MAX_BODY_CHARS = 4000
+MAX_DISCUSSION_CHARS = 3000
+MAX_COMMENT_CHARS = 600
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _GITHUB_REMOTE = re.compile(r"github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?$")
 
@@ -51,6 +60,7 @@ def ingest_history(repo_id: int, repo_path: Path, owner: str | None, name: str |
         progress("Fetching issues from GitHub", None, None)
         issues = fetch_issues(owner, name, SyncState.from_dict(sync.get("issues")))
         _upsert_issues(repo_id, issues)
+        _update_pr_comment_counts(repo_id, issues.pr_comment_counts)
         _save_sync(repo_id, {"pull_requests": asdict(prs.state), "issues": asdict(issues.state)})
         stats["github"] = {
             "complete": prs.complete and issues.complete,
@@ -64,9 +74,16 @@ def ingest_history(repo_id: int, repo_path: Path, owner: str | None, name: str |
     progress("Linking commits, pull requests and issues", None, None)
     stats["links"] = _rebuild_links(repo_id, repo_path, commits)
 
+    if owner and name:
+        # After linking: the threads behind code (PRs merged from commits, the
+        # issues they fix) are fetched first.
+        progress("Fetching pull request and issue discussions", None, None)
+        stats["github"]["discussions"] = _sync_comments(repo_id, owner, name)
+
     rows = _history_chunks(repo_id, commits)
-    delete_chunks(repo_id, HISTORY_TYPES)
-    store_chunks(repo_id, rows, lambda done, total: progress("Embedding history", done, total))
+    sync = sync_chunks(repo_id, HISTORY_TYPES, rows,
+                       lambda done, total: progress("Embedding new history", done, total))
+    stats["index"] = {"reused": sync.reused, "embedded": sync.embedded, "deleted": sync.deleted}
 
     with connection() as conn:
         counts = conn.execute(
@@ -126,8 +143,10 @@ def _load_sync(repo_id: int) -> dict:
 
 
 def _save_sync(repo_id: int, sync: dict) -> None:
+    """Merge top-level keys into the stored sync state."""
     with connection() as conn:
-        conn.execute("UPDATE repositories SET sync = %s WHERE id = %s", (Jsonb(sync), repo_id))
+        conn.execute("UPDATE repositories SET sync = sync || %s WHERE id = %s",
+                     (Jsonb(sync), repo_id))
 
 
 def _clean_body(body: str | None) -> str:
@@ -176,6 +195,104 @@ def _upsert_issues(repo_id: int, result: FetchResult) -> None:
               i["created_at"], i["updated_at"], i.get("closed_at"), i["html_url"])
              for i in result.items],
         )
+
+
+def _update_pr_comment_counts(repo_id: int, counts: dict[int, int]) -> None:
+    if not counts:
+        return
+    with connection() as conn, conn.cursor() as cur:
+        cur.executemany("UPDATE pull_requests SET comments = %s WHERE repo_id = %s AND number = %s",
+                        [(c, repo_id, n) for n, c in counts.items()])
+
+
+# --------------------------------------------------------------- discussions
+
+
+def _sync_comments(repo_id: int, owner: str, name: str) -> dict:
+    settings = get_settings()
+    done: dict[str, str] = _load_sync(repo_id).get("comments") or {}
+    with connection() as conn:
+        linked = conn.execute(
+            """SELECT DISTINCT dst_type, dst_key FROM links
+               WHERE repo_id = %s AND dst_type IN ('pull_request', 'issue')""",
+            (repo_id,)).fetchall()
+        prs = conn.execute(
+            "SELECT number, comments, updated_at FROM pull_requests WHERE repo_id = %s",
+            (repo_id,)).fetchall()
+        issues = conn.execute(
+            """SELECT number, comments, updated_at FROM issues
+               WHERE repo_id = %s AND comments > 0""", (repo_id,)).fetchall()
+    linked_prs = {int(r["dst_key"]) for r in linked if r["dst_type"] == "pull_request"}
+    linked_issues = {int(r["dst_key"]) for r in linked if r["dst_type"] == "issue"}
+    stamp = {f"pull_request:{p['number']}": _iso(p["updated_at"]) for p in prs}
+    stamp |= {f"issue:{i['number']}": _iso(i["updated_at"]) for i in issues}
+
+    def stale(t: CommentTarget) -> bool:
+        return done.get(t.key) != stamp.get(t.key)
+
+    newest = lambda rows: sorted(rows, key=lambda r: -r["number"])  # noqa: E731
+    tiers = [
+        # Threads behind code first: PRs merged from commits (with their review
+        # comments on diff lines) and issues they reference.
+        [CommentTarget("pull_request", p["number"], conversation=p["comments"] != 0,
+                       review=True) for p in newest(prs) if p["number"] in linked_prs],
+        [CommentTarget("issue", i["number"]) for i in newest(issues)
+         if i["number"] in linked_issues],
+        [CommentTarget("issue", i["number"]) for i in newest(issues)
+         if i["number"] not in linked_issues],
+        [CommentTarget("pull_request", p["number"]) for p in newest(prs)
+         if p["number"] not in linked_prs and (p["comments"] or 0) > 0],
+    ]
+    targets = [t for tier in tiers for t in tier if stale(t)]
+    if not targets:
+        return {"threads": 0, "comments": 0, "pending": 0, "note": None}
+    result = fetch_comments(owner, name, targets, settings.github_max_comment_requests)
+    if result.items:
+        with connection() as conn, conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO comments (repo_id, comment_id, parent_type, parent_number, kind,
+                       author, body, path, created_at, url)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (repo_id, comment_id, kind) DO UPDATE SET
+                       body = EXCLUDED.body, path = EXCLUDED.path""",
+                [(repo_id, c["comment_id"], c["parent_type"], c["parent_number"], c["kind"],
+                  c["author"], _clean_body(c["body"]), c["path"], c["created_at"], c["url"])
+                 for c in result.items])
+    done.update({key: stamp.get(key) for key in result.done})
+    _save_sync(repo_id, {"comments": done})
+    return {"threads": len(result.done), "comments": len(result.items),
+            "pending": len(targets) - len(result.done), "note": result.note}
+
+
+def _discussions(repo_id: int) -> dict[tuple[str, int], list[dict]]:
+    with connection() as conn:
+        rows = conn.execute(
+            """SELECT parent_type, parent_number, kind, author, body, path FROM comments
+               WHERE repo_id = %s ORDER BY created_at""", (repo_id,)).fetchall()
+    out: dict[tuple[str, int], list[dict]] = {}
+    for r in rows:
+        out.setdefault((r["parent_type"], r["parent_number"]), []).append(r)
+    return out
+
+
+def _discussion_text(comments: list[dict]) -> str:
+    """A thread as plain text, oldest first, capped so long threads don't
+    drown the description."""
+    lines, used = [], 0
+    for c in comments:
+        body = " ".join(c["body"].split())
+        if not body:
+            continue
+        if len(body) > MAX_COMMENT_CHARS:
+            body = body[:MAX_COMMENT_CHARS] + "…"
+        where = f" on {c['path']}" if c["path"] else ""
+        line = f"- {c['author'] or 'someone'}{where}: {body}"
+        if used + len(line) > MAX_DISCUSSION_CHARS:
+            lines.append(f"- … ({len(comments) - len(lines)} more comments)")
+            break
+        lines.append(line)
+        used += len(line)
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------- links
@@ -248,6 +365,7 @@ def _history_chunks(repo_id: int, commits: list[CommitInfo]) -> list[ChunkRow]:
         prs = conn.execute("SELECT * FROM pull_requests WHERE repo_id = %s",
                            (repo_id,)).fetchall()
         issues = conn.execute("SELECT * FROM issues WHERE repo_id = %s", (repo_id,)).fetchall()
+    threads = _discussions(repo_id)
 
     rows: list[ChunkRow] = []
     for c in commits:
@@ -271,6 +389,8 @@ def _history_chunks(repo_id: int, commits: list[CommitInfo]) -> list[ChunkRow]:
         content = f"PR #{p['number']}: {p['title']}\n\n{p['body'][:MAX_BODY_CHARS]}".strip()
         if p["labels"]:
             content += f"\n\nLabels: {', '.join(p['labels'])}"
+        if thread := threads.get(("pull_request", p["number"])):
+            content += f"\n\nDiscussion:\n{_discussion_text(thread)}"
         rows.append(ChunkRow(
             source_type="pull_request", content=content,
             embed_text=f"Pull request by {p['author']}\n{content}",
@@ -284,6 +404,8 @@ def _history_chunks(repo_id: int, commits: list[CommitInfo]) -> list[ChunkRow]:
         content = f"Issue #{i['number']}: {i['title']}\n\n{i['body'][:MAX_BODY_CHARS]}".strip()
         if i["labels"]:
             content += f"\n\nLabels: {', '.join(i['labels'])}"
+        if thread := threads.get(("issue", i["number"])):
+            content += f"\n\nDiscussion:\n{_discussion_text(thread)}"
         rows.append(ChunkRow(
             source_type="issue", content=content,
             embed_text=f"Issue reported by {i['author']}\n{content}",

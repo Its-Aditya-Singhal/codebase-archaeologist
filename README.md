@@ -4,9 +4,9 @@ An investigation tool that explains software repositories: what the code does, *
 where it came from, and how it evolved**. It answers from evidence retrieved from the repository
 and cites every source, so the developer can check it.
 
-> Status: **Phase 1** (ingestion + RAG), **Phase 2** (Git / PR / issue intelligence) and
-> **Phase 3** (knowledge graph) are working. See [docs/ROADMAP.md](docs/ROADMAP.md) for the
-> architecture and the plan for phase 4 (interactive investigation experience).
+> Status: **Phases 1–3** (ingestion + RAG, Git / PR / issue intelligence, knowledge graph) are
+> complete, and the **backend of phase 4** (explorer, evolution, case files, agent mode) is
+> built and tested; its UI is next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What works today
 
@@ -30,6 +30,11 @@ and cites every source, so the developer can check it.
 - Impact analysis: everything that reaches the code (3 hops), the tests that exercise it,
   files that historically change with it, and a change-risk verdict with its reasons. "What
   would break if…" questions get this as cited evidence.
+- Follow-up questions and saved investigations (case files) with their evidence
+- Agent mode: a model gathers evidence over several tool-using steps before answering
+- Evolution: a function's code at every version, with the PR behind each change
+- PR and issue discussions (incl. review comments) as evidence
+- Incremental re-indexing: only new or changed code and history is re-embedded
 - Streamed, cited answers with inline `[S#]` citations; clicking one opens the source
   (code, commit, PR or issue). Three answer writers, picked automatically:
   an **evidence briefing** (no model, free, the default), a **local model via Ollama** (free),
@@ -95,17 +100,23 @@ re-indexes (it resumes where it stopped). With a token it completes in one run.
 |---|---|---|
 | `POST` | `/api/repos` `{url}` | register + start indexing |
 | `GET` | `/api/repos`, `/api/repos/{id}` | status, progress, stats |
-| `POST` | `/api/repos/{id}/reindex` | re-clone/fetch and rebuild the index |
+| `POST` | `/api/repos/{id}/reindex` | re-clone/fetch and update the index (incremental) |
 | `GET` | `/api/repos/{id}/files`, `/api/repos/{id}/file?path=` | explorer + file with symbols |
 | `GET` | `/api/repos/{id}/history?path=&start_line=&end_line=` | commits that changed a range/file, with PRs/issues |
 | `GET` | `/api/repos/{id}/commits/{sha}?path=` | commit details and diff |
 | `GET` | `/api/repos/{id}/graph?path=&start_line=&end_line=` | graph neighbourhood of a symbol/file + provenance chain |
 | `GET` | `/api/repos/{id}/impact?path=&start_line=&end_line=` | dependents, tests, co-change, risk |
 | `POST` | `/api/repos/{id}/graph/rebuild` | rebuild only the graph from the stored index |
+| `GET` | `/api/repos/{id}/graph/overview?level=file\|dir&depth=` | architecture map: aggregated dependencies, churn, packages |
+| `GET` | `/api/repos/{id}/graph/search?q=&kinds=` | find graph nodes by name |
+| `GET` | `/api/repos/{id}/graph/nodes/{node}` · `/expand?kinds=&direction=&since=&until=` | node detail · neighbours, time-filtered |
+| `GET` | `/api/repos/{id}/evolution?path=&start_line=&end_line=` | a definition's versions over time with diffs and PRs |
 | `POST` | `/api/repos/{id}/search` `{question, focus?}` | ranked evidence only (no LLM) |
-| `POST` | `/api/repos/{id}/ask` `{question, focus?}` | SSE: `sources` → `delta`* → `done`/`error` |
+| `POST` | `/api/repos/{id}/ask` `{question, focus?, investigation_id?, mode?}` | SSE: `investigation` → `step`* (agent) → `sources` → `delta`* → `done`/`error` |
+| `GET` | `/api/repos/{id}/investigations` | saved investigations |
+| `GET` `PATCH` `DELETE` | `/api/investigations/{inv}` | open (turns with evidence) · rename · delete |
 
-`focus` is `{path, start_line?, end_line?}`.
+`focus` is `{path, start_line?, end_line?}`; `mode` is `answer` (default) or `agent`.
 
 ## Development
 
@@ -114,20 +125,26 @@ cd backend && uv run pytest && uv run ruff check app tests
 cd frontend && npx tsc --noEmit && npm run lint
 ```
 
+`pytest` runs unit tests plus integration tests that index a generated git repository through
+the API into a throwaway `archaeologist_test` database (skipped if PostgreSQL isn't running).
+Schema changes go in a new numbered file in `backend/app/migrations/`; they apply on startup.
+
 ## Layout
 
 ```
 backend/app/
   ingestion/   repo_source (clone), filters, chunker (tree-sitter), pipeline
   history/     git_log (log, -L, blame-style range history), github (resumable PR/issue sync),
-               links, ingest, provenance (code -> commits -> PRs -> issues), timeline
+               links, ingest (+ discussions), provenance (code -> commits -> PRs -> issues),
+               timeline, evolution (a definition's versions)
   graph/       extract (tree-sitter imports/calls/bases), resolve (module systems), manifests,
-               build (graph over code + history), query (neighbourhood, impact, related code)
+               build (graph over code + history), query (neighbourhood, impact, related code),
+               explore (overview, search, expand)
   retrieval/   hybrid (vector + lexical + symbol + focus + graph + provenance, RRF)
-  answering/   prompts (evidence contract), answer (Claude streaming)
+  answering/   prompts, answer (Claude | Ollama | briefing), briefing, agent (tool loop)
+  investigations.py  case files: saved turns, follow-up context
+  migrations/  numbered SQL, applied in order on startup
   embeddings/  Embedder protocol + local fastembed
-  schema.sql   repositories · files · chunks · commits · pull_requests · issues · links ·
-               graph_nodes · graph_edges
 frontend/src/
   app/                  landing (sites) + /repos/[id] workspace
   components/workspace  FileExplorer · CodeViewer · Investigation

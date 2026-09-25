@@ -26,6 +26,7 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: needs PostgreSQL (uses a throwaway archaeologist_test database)"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

@@ -80,3 +80,43 @@ def test_issues_listing_skips_pull_requests(api):
             {"number": 1, "updated_at": "2025-01-01T00:00:00Z"}])
     api(handler)
     assert [i["number"] for i in fetch_issues("o", "r", SyncState()).items] == [1]
+
+
+def test_comments_budget_and_rate_limit(api, monkeypatch):
+    from app.history.github import CommentTarget, fetch_comments
+
+    served: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        served.append(request.url.path)
+        n = int(request.url.path.split("/")[-2])
+        body = [{"id": n * 10 + i, "user": {"login": "ann"}, "body": f"c{i}",
+                 "created_at": "2026-01-01T00:00:00Z", "html_url": "u",
+                 "path": "a.py" if "pulls" in request.url.path else None} for i in range(2)]
+        return httpx.Response(200, json=body, headers={"x-ratelimit-remaining": "500"})
+
+    api(handler)
+    targets = [CommentTarget("pull_request", 7, review=True), CommentTarget("issue", 3),
+               CommentTarget("issue", 2)]
+    result = fetch_comments("o", "r", targets, max_requests=3)
+    # PR 7 takes two requests (conversation + review), issue 3 the third; issue 2
+    # is left for the next run.
+    assert result.done == ["pull_request:7", "issue:3"]
+    assert result.note and "budget" in result.note
+    kinds = {(c["parent_number"], c["kind"], c["path"]) for c in result.items}
+    assert (7, "review", "a.py") in kinds and (3, "conversation", None) in kinds
+    assert len(served) == 3
+
+
+def test_issues_listing_records_pr_comment_counts(api):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            {"number": 5, "updated_at": "2026-01-02T00:00:00Z", "comments": 4,
+             "pull_request": {}},
+            {"number": 4, "updated_at": "2026-01-01T00:00:00Z", "comments": 1},
+        ])
+
+    api(handler)
+    result = fetch_issues("o", "r", SyncState())
+    assert [i["number"] for i in result.items] == [4]
+    assert result.pr_comment_counts == {5: 4}

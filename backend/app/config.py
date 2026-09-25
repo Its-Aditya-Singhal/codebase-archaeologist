@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     max_commits: int = 20_000
     # Pages of 100 per GitHub listing (pull requests, issues) per indexing run.
     github_max_pages: int = 10
+    # GitHub requests per indexing run for PR/issue discussion threads.
+    github_max_comment_requests: int = 200
 
     cors_origins: list[str] = ["http://localhost:3000"]
 
