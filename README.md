@@ -72,6 +72,9 @@ uv sync
 uv run uvicorn app.main:app --port 8000 --reload --reload-dir app
 ```
 
+After the first setup, `./dev.sh` from the repo root starts the API and the frontend together
+(Ctrl+C stops both).
+
 If you use the Docker database, set
 `DATABASE_URL=postgresql://archaeologist:archaeologist@localhost:5432/archaeologist` in `backend/.env`.
 
