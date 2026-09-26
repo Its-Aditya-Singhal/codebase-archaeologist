@@ -305,9 +305,13 @@ function Record({
 }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const byRef = new Map(record.evidence.map((e) => [e.ref, e]));
-  const cited = new Set([...record.answer.matchAll(/\[(S\d+)\]/g)].map((m) => m[1]));
+  // Models sometimes group citations ("[S1, S3]"); split them into "[S1][S3]".
+  const answer = record.answer.replace(/\[(S\d+(?:\s*,\s*S\d+)+)\]/g, (_, refs: string) =>
+    refs.split(/\s*,\s*/).map((r) => `[${r}]`).join(""),
+  );
+  const cited = new Set([...answer.matchAll(/\[(S\d+)\]/g)].map((m) => m[1]));
   // Turn [S3] into links the markdown renderer hands to our citation chip.
-  const linked = record.answer.replace(/\[(S\d+)\]/g, "[$1](#cite-$1)");
+  const linked = answer.replace(/\[(S\d+)\]/g, "[$1](#cite-$1)");
   const running = record.status === "retrieving" || record.status === "answering";
 
   return (

@@ -22,7 +22,8 @@ issues those PRs fixed or referenced. A commit tagged role="introduced" is the e
 that touched the code in question within its current file; role="modified" commits changed it \
 later. Line history does not follow code across files, so if the introducing commit looks like \
 a move, rename or bulk refactor, say the code likely predates it. Name authors, dates, commit \
-SHAs (short form) and PR/issue numbers when they matter to the answer.
+SHAs (short form) and PR/issue numbers when they matter to the answer. Copy dates exactly \
+as the source attributes give them (YYYY-MM-DD); never infer or reformat a year.
 - "What calls this", "what depends on this" and "what would break" questions are answered from \
 the static dependency graph. A code source with a `relation` attribute (e.g. relation="calls \
 Queue.enqueue") was retrieved because the graph links it to the code in question; a \

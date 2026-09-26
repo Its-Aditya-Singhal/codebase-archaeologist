@@ -8,6 +8,14 @@ and cites every source, so the developer can check it.
 > knowledge graph, and the investigation experience (architecture map, evolution, case files,
 > agent mode). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
+![Landing page](docs/screenshots/landing.png)
+
+| Cited answers about a selected function | How it evolved, version by version |
+|---|---|
+| ![Workspace](docs/screenshots/workspace.png) | ![Evolution](docs/screenshots/evolution.png) |
+| **Architecture map** | **Knowledge-graph explorer** |
+| ![Map](docs/screenshots/map.png) | ![Explorer](docs/screenshots/explorer.png) |
+
 ## What works today
 
 - Index any public GitHub repo (`owner/repo` or URL), a private one with `GITHUB_TOKEN`, or a
