@@ -3,3 +3,7 @@
 .env.local
 node_modules/
 __pycache__/
+
+# Local editor tooling (not part of the project)
+.claude/
+frontend/CLAUDE.md
