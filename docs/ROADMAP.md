@@ -133,32 +133,38 @@ reflection or string-based lookups, and a variable receiver not named after its 
 language server or stack-graphs) would raise precision. Symbol-level `modifies` edges are
 computed on demand with `git log -L` rather than stored.
 
-## Phase 4: investigation experience (backend ✅, frontend next)
+## Phase 4: investigation experience ✅
 
-The backend for every phase-4 feature is built and tested; what remains is UI.
+Every phase-4 feature has its backend and its workspace UI.
 
 - **Relationship explorer** (`graph/explore.py`): `GET /graph/overview` (architecture at file
   or directory level: dependency edges aggregated from imports, calls and inheritance, node
   size/churn/test share, external packages), `/graph/search`, `/graph/nodes/{id}` (degree per
   edge kind) and `/graph/nodes/{id}/expand` (neighbours by edge kind and direction, with
-  commits/PRs/issues filtered to a date window). UI to build: pan/zoom canvas with
-  expand-on-click and type/time filters.
+  commits/PRs/issues filtered to a date window). **UI**: the Map tab, a pan/zoom
+  canvas (force layout, no graph library) with the architecture at directory or file level,
+  and an explorer that expands nodes on double-click with relation-type, direction and date
+  filters.
 - **Evolution** (`history/evolution.py`, `GET /evolution`): a definition's versions, oldest
   first. The `git log -L` hunk header gives the range's position at each commit; slicing the
   file at that commit reconstructs the code as it was, alongside the diff and the PR/issues.
-  A selection inside a function widens to the function. UI to build: version stepper.
+  A selection inside a function widens to the function. **UI**: the Evolution tab, a version
+  stepper (← →) showing the code at each version with changed lines marked, the diff, and
+  the PR/issues.
 - **Case files and follow-ups** (`investigations.py`): every `/ask` turn is stored with focus,
   evidence, answer and writer; `investigation_id` continues a thread. A short or referential
   follow-up ("who calls it?") borrows the previous question's subject for retrieval, and the
   writer receives the earlier turns (citations stripped, since they referred to old evidence).
-  Endpoints to list, open, rename and delete. UI to build: thread list, reopen, follow-ups.
+  Endpoints to list, open, rename and delete. **UI**: a case-files drawer
+  (reopen, rename, delete), follow-up threads and a New investigation button.
 - **Agentic investigations** (`answering/agent.py`, `/ask` with `mode: "agent"`): the model
   first gathers evidence with seven tools (search, read_code, find_symbol, code_history,
   relations, impact, open_record) for up to 6 rounds; each tool result joins one numbered
   evidence pool and is streamed as a `step` event; then the normal writer answers from the
   pool with the same citation contract. Works with Claude or a local Ollama model; without a
   model it falls back to single-pass retrieval and says so. Arguments are validated and
-  repeated calls refused. UI to build: live evidence trail.
+  repeated calls refused. **UI**: an Answer/Agent switch and
+  a live evidence trail of each tool call and the sources it added.
 
 Also completed alongside:
 
@@ -185,8 +191,9 @@ Also completed alongside:
   job queue is the step up once many repositories are indexed concurrently.
 - Without `GITHUB_TOKEN` (60 requests/hour), large repos need several re-indexes an hour apart
   to fetch all PRs, issues and discussions; everything resumes where it stopped.
-- The Gemini and Claude answer/agent paths are tested against canned API responses but have not
-  been run against the live APIs in this project; the briefing and data paths are tested end to end.
+- The Gemini answer, follow-up and agent paths have been run against the live free-tier API
+  (Sept 2026); free-tier models are often overloaded, so overloads (5xx) and rate limits (429)
+  fall back to the lighter model. The Claude path is tested only against canned API responses.
 - Accounts are email/password only: no email verification, password reset or OAuth yet. Login
   throttling is in memory (per process). A server-wide `GITHUB_TOKEN` is used for every user's
   clones, so on a shared deployment it should not have access to private repositories.

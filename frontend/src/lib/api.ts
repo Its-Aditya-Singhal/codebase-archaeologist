@@ -212,6 +212,122 @@ export interface Impact {
   churn: { commits: number; authors: number; last_changed: string | null; file_commits: number };
 }
 
+export type AskMode = "answer" | "agent";
+
+/** One tool call in agent mode, streamed as it happens. */
+export interface AgentStep {
+  n: number;
+  tool: string | null; // null: the agent stopped or could not run
+  input: Record<string, unknown>;
+  summary: string;
+  added: string[]; // evidence refs this step contributed
+}
+
+export interface InvestigationSummary {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  turns: number;
+  last_question: string | null;
+}
+
+export interface InvestigationTurn {
+  id: number;
+  position: number;
+  question: string;
+  focus: Focus | null;
+  mode: AskMode;
+  steps: AgentStep[];
+  evidence: Evidence[];
+  answer: string;
+  answered_by: { provider: Provider; model: string } | null;
+  status: "done" | "error";
+  error: string | null;
+  created_at: string;
+}
+
+export interface InvestigationDetail {
+  id: number;
+  repo_id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  turns: InvestigationTurn[];
+}
+
+export interface EvolutionVersion {
+  sha: string;
+  author: string;
+  date: string;
+  subject: string;
+  role: "introduced" | null;
+  path: string;
+  start_line: number | null;
+  end_line: number | null;
+  code: string | null;
+  diff: string | null;
+  added: number;
+  removed: number;
+  pull_requests: PullRequestRef[];
+  issues: IssueRef[];
+}
+
+export interface Evolution {
+  path: string;
+  start_line: number;
+  end_line: number;
+  symbol: string | null;
+  language: string | null;
+  total_versions: number;
+  truncated: boolean;
+  authors: string[];
+  versions: EvolutionVersion[]; // oldest first
+}
+
+/** Architecture overview: directories or files, plus external packages. */
+export interface OverviewNode {
+  id: string; // "dir:rq", "file:rq/job.py", "dependency:redis", "module:typing"
+  kind: "dir" | "file" | "dependency" | "module";
+  label: string;
+  path: string | null;
+  files?: number;
+  lines?: number;
+  symbols?: number;
+  commits?: number;
+  tests?: number;
+  in?: number;
+  out?: number;
+  users?: number;
+  ecosystem?: string;
+}
+
+export interface OverviewEdge {
+  src: string;
+  dst: string;
+  weight: number;
+  kinds: Record<string, number>;
+}
+
+export interface Overview {
+  level: "dir" | "file";
+  nodes: OverviewNode[];
+  edges: OverviewEdge[];
+  total_nodes: number;
+  truncated: boolean;
+}
+
+export interface GraphNodeDetail extends GraphNode {
+  degree: Record<string, { in: number; out: number }>;
+}
+
+export interface Expansion {
+  node_id: number;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  totals: Record<string, number>; // "in:calls" -> count before limiting
+}
+
 export const IN_PROGRESS: RepoStatus[] = [
   "queued",
   "cloning",
@@ -323,11 +439,50 @@ export const api = {
     apiFetch(
       `${API_URL}/api/repos/${id}/commits/${sha}${path ? `?path=${encodeURIComponent(path)}` : ""}`,
     ).then(json<CommitDetail>),
+  evolution: (id: number, focus: Focus) =>
+    apiFetch(`${API_URL}/api/repos/${id}/evolution?${locationQuery(focus)}`).then(json<Evolution>),
+  overview: (id: number, level: "dir" | "file", depth = 2) =>
+    apiFetch(`${API_URL}/api/repos/${id}/graph/overview?level=${level}&depth=${depth}`).then(
+      json<Overview>,
+    ),
+  searchGraph: (id: number, q: string) =>
+    apiFetch(
+      `${API_URL}/api/repos/${id}/graph/search?q=${encodeURIComponent(q)}&kinds=symbol&kinds=file&kinds=dependency&kinds=module`,
+    ).then(json<GraphNode[]>),
+  graphNode: (id: number, node: number) =>
+    apiFetch(`${API_URL}/api/repos/${id}/graph/nodes/${node}`).then(json<GraphNodeDetail>),
+  expand: (
+    id: number,
+    node: number,
+    opts: { kinds?: string[]; direction?: "in" | "out" | "both"; since?: string; until?: string } = {},
+  ) => {
+    const q = new URLSearchParams({ direction: opts.direction ?? "both", limit: "12" });
+    for (const k of opts.kinds ?? []) q.append("kinds", k);
+    if (opts.since) q.set("since", opts.since);
+    if (opts.until) q.set("until", opts.until);
+    return apiFetch(`${API_URL}/api/repos/${id}/graph/nodes/${node}/expand?${q}`).then(
+      json<Expansion>,
+    );
+  },
+  investigations: (id: number) =>
+    apiFetch(`${API_URL}/api/repos/${id}/investigations`).then(json<InvestigationSummary[]>),
+  investigation: (inv: number) =>
+    apiFetch(`${API_URL}/api/investigations/${inv}`).then(json<InvestigationDetail>),
+  renameInvestigation: (inv: number, title: string) =>
+    apiFetch(`${API_URL}/api/investigations/${inv}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title }),
+    }).then(json<{ id: number; title: string }>),
+  deleteInvestigation: (inv: number) =>
+    apiFetch(`${API_URL}/api/investigations/${inv}`, { method: "DELETE" }),
 };
 
 export type Provider = "gemini" | "anthropic" | "ollama" | "briefing";
 
 export type AskEvent =
+  | { event: "investigation"; data: { id: number; follow_up: boolean } }
+  | { event: "step"; data: AgentStep }
   | { event: "sources"; data: Evidence[] }
   | { event: "delta"; data: { text: string } }
   | {
@@ -346,7 +501,7 @@ export async function* ask(
   repoId: number,
   question: string,
   focus: Focus | null,
-  signal?: AbortSignal,
+  opts: { investigationId?: number | null; mode?: AskMode; signal?: AbortSignal } = {},
 ): AsyncGenerator<AskEvent> {
   const res = await apiFetch(`${API_URL}/api/repos/${repoId}/ask`, {
     method: "POST",
@@ -356,8 +511,10 @@ export async function* ask(
       focus: focus
         ? { path: focus.path, start_line: focus.start_line, end_line: focus.end_line }
         : null,
+      investigation_id: opts.investigationId ?? null,
+      mode: opts.mode ?? "answer",
     }),
-    signal,
+    signal: opts.signal,
   });
   if (!res.ok || !res.body) {
     yield { event: "error", data: { message: (await res.text()) || res.statusText } };

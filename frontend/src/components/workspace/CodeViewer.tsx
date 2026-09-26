@@ -13,7 +13,7 @@ export interface Highlight {
 
 const LANG_ALIASES: Record<string, string> = { bash: "shellscript" };
 
-function shikiLang(language: string | null): string {
+export function shikiLang(language: string | null): string {
   const l = language ? (LANG_ALIASES[language] ?? language) : "text";
   return l in bundledLanguages ? l : "text";
 }

@@ -4,9 +4,9 @@ An investigation tool that explains software repositories: what the code does, *
 where it came from, and how it evolved**. It answers from evidence retrieved from the repository
 and cites every source, so the developer can check it.
 
-> Status: **Phases 1–3** (ingestion + RAG, Git / PR / issue intelligence, knowledge graph) are
-> complete, and the **backend of phase 4** (explorer, evolution, case files, agent mode) is
-> built and tested; its UI is next. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> Status: **Phases 1–4** are complete: ingestion + RAG, Git / PR / issue intelligence, the
+> knowledge graph, and the investigation experience (architecture map, evolution, case files,
+> agent mode). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What works today
 
@@ -30,9 +30,16 @@ and cites every source, so the developer can check it.
 - Impact analysis: everything that reaches the code (3 hops), the tests that exercise it,
   files that historically change with it, and a change-risk verdict with its reasons. "What
   would break if…" questions get this as cited evidence.
-- Follow-up questions and saved investigations (case files) with their evidence
-- Agent mode: a model gathers evidence over several tool-using steps before answering
-- Evolution: a function's code at every version, with the PR behind each change
+- Case files: every investigation is saved with its evidence; reopen, rename or delete it, and
+  ask follow-ups ("who calls it?") that keep the earlier questions' context
+- Agent mode: a model gathers evidence over several tool-using steps before answering, and
+  the workspace shows each step live (what it searched, read or traced, and the sources it added)
+- Evolution tab: step through a function's versions over time (← →), with the code as it was,
+  the lines each commit changed, and the PR and issues behind every change
+- Map tab: the architecture as a pan/zoom graph (directories or files, sized by lines, lit by
+  churn, linked by calls/imports, with external packages), and an explorer that grows the
+  knowledge graph from any function, file or package on double-click, filtered by relation
+  type, direction and a history date window
 - PR and issue discussions (incl. review comments) as evidence
 - Incremental re-indexing: only new or changed code and history is re-embedded
 - Streamed, cited answers with inline `[S#]` citations; clicking one opens the source
@@ -171,9 +178,10 @@ frontend/src/
   components/landing    Hero (live demo) · Strata · EvidenceChain · Sections (scroll-driven, motion)
   components/motion     Reveal · Stagger · CountUp · GlowCard (respect prefers-reduced-motion)
   components/auth       AuthProvider (session gate) · AuthForm · AuthArt · UserMenu
-  components/workspace  FileExplorer · CodeViewer · Investigation
-  components/history    TimelinePanel · CommitView/RecordView · Diff and PR/issue chips
-  components/graph      RelationsPanel · NeighborhoodGraph · ImpactView
+  components/workspace  FileExplorer · CodeViewer · Investigation · AgentTrail · CaseFiles
+  components/history    TimelinePanel · EvolutionPanel · CommitView/RecordView · Diff, PR/issue chips
+  components/graph      RelationsPanel · NeighborhoodGraph · ImpactView · ArchitectureMap
+                        (MapCanvas: pan/zoom SVG, forceLayout: dependency-free force layout)
   lib/api.ts            typed client + SSE reader
 docs/ROADMAP.md         architecture and phase plan
 ```

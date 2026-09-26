@@ -3,21 +3,55 @@
 import Link from "next/link";
 import { UserMenu } from "@/components/auth/UserMenu";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Code2, GitCommitHorizontal, History, Network, TriangleAlert } from "lucide-react";
-import { api, ask, type Evidence, type FileDetail, type Focus, type Repo, type RepoFile } from "@/lib/api";
+import { ArrowLeft, Code2, GitCommitHorizontal, History, Map as MapIcon, Network, Spline, TriangleAlert } from "lucide-react";
+import {
+  api,
+  ask,
+  type AskMode,
+  type Evidence,
+  type FileDetail,
+  type Focus,
+  type InvestigationTurn,
+  type Repo,
+  type RepoFile,
+} from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { FileExplorer } from "./FileExplorer";
 import { CodeViewer, type Highlight } from "./CodeViewer";
-import { InvestigationPanel, type InvestigationRecord } from "./Investigation";
+import { InvestigationPanel, type InvestigationRecord, type Thread } from "./Investigation";
 import { TimelinePanel } from "@/components/history/TimelinePanel";
 import { CommitView, RecordView } from "@/components/history/RecordViews";
 import { RelationsPanel, type RelationsMode } from "@/components/graph/RelationsPanel";
+import { EvolutionPanel } from "@/components/history/EvolutionPanel";
+import { ArchitectureMap } from "@/components/graph/ArchitectureMap";
+
+/** A saved turn, shown the way a live one is. */
+function recordFromTurn(t: InvestigationTurn, i: number): InvestigationRecord {
+  const f = t.focus;
+  const lines = f?.start_line ? `:${f.start_line}${f.end_line && f.end_line !== f.start_line ? `–${f.end_line}` : ""}` : "";
+  const focus = f ? { ...f, label: f.label ?? `${f.path.split("/").pop()}${lines}` } : null;
+  return {
+    id: `turn-${t.id}`,
+    question: t.question,
+    focus,
+    mode: t.mode ?? "answer",
+    steps: t.steps ?? [],
+    evidence: t.evidence ?? [],
+    answer: t.answer ?? "",
+    status: t.status === "error" ? "error" : "done",
+    error: t.error ?? undefined,
+    followUp: i > 0,
+    answeredBy: t.answered_by ?? undefined,
+  };
+}
 
 /** What the centre panel shows. */
 type CenterView =
   | { kind: "code" }
   | { kind: "history" }
+  | { kind: "evolution" }
   | { kind: "relations" }
+  | { kind: "map" }
   | { kind: "commit"; sha: string; path: string | null }
   | { kind: "record"; evidence: Evidence };
 
@@ -28,6 +62,7 @@ export function Workspace({ repoId }: { repoId: number }) {
   const [highlight, setHighlight] = useState<Highlight | null>(null);
   const [focus, setFocus] = useState<Focus | null>(null);
   const [records, setRecords] = useState<InvestigationRecord[]>([]);
+  const [thread, setThread] = useState<Thread>({ id: null, title: null });
   const [loadError, setLoadError] = useState<string | null>(null);
   const [view, setView] = useState<CenterView>({ kind: "code" });
   const [relMode, setRelMode] = useState<RelationsMode>("graph");
@@ -110,20 +145,31 @@ export function Workspace({ repoId }: { repoId: number }) {
     setRecords((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch(r) } : r)));
   }
 
-  async function investigate(question: string) {
+  async function investigate(question: string, mode: AskMode) {
     const id = crypto.randomUUID();
     const askedFocus = focus;
-    setRecords((rs) => [...rs, { id, question, focus: askedFocus, evidence: [], answer: "", status: "retrieving" }]);
+    setRecords((rs) => [
+      ...rs,
+      { id, question, focus: askedFocus, mode, steps: [], evidence: [], answer: "", status: "retrieving" },
+    ]);
     abort.current = new AbortController();
     try {
-      for await (const ev of ask(repoId, question, askedFocus, abort.current.signal)) {
-        if (ev.event === "sources") update(id, () => ({ evidence: ev.data, status: "answering" }));
+      for await (const ev of ask(repoId, question, askedFocus, {
+        investigationId: thread.id,
+        mode,
+        signal: abort.current.signal,
+      })) {
+        if (ev.event === "investigation") {
+          setThread((t) => (t.id === ev.data.id ? t : { id: ev.data.id, title: question }));
+          update(id, () => ({ followUp: ev.data.follow_up }));
+        } else if (ev.event === "step") update(id, (r) => ({ steps: [...r.steps, ev.data] }));
+        else if (ev.event === "sources") update(id, () => ({ evidence: ev.data, status: "answering" }));
         else if (ev.event === "delta") update(id, (r) => ({ answer: r.answer + ev.data.text }));
         else if (ev.event === "done")
           update(id, () => ({ status: "done", answeredBy: { provider: ev.data.provider, model: ev.data.model } }));
         else if (ev.event === "error") update(id, () => ({ status: "error", error: ev.data.message }));
       }
-      update(id, (r) => (r.status === "answering" ? { status: "done" } : {}));
+      update(id, (r) => (r.status === "answering" || r.status === "retrieving" ? { status: "done" } : {}));
     } catch (e) {
       const aborted = (e as Error).name === "AbortError";
       update(id, (r) => ({
@@ -131,6 +177,25 @@ export function Workspace({ repoId }: { repoId: number }) {
         error: aborted ? undefined : (e as Error).message,
         answer: aborted && r.answer ? r.answer + "\n\n*(stopped)*" : r.answer,
       }));
+    }
+  }
+
+  function newThread() {
+    abort.current?.abort();
+    setRecords([]);
+    setThread({ id: null, title: null });
+  }
+
+  async function openThread(invId: number) {
+    abort.current?.abort();
+    try {
+      const inv = await api.investigation(invId);
+      setRecords(inv.turns.map(recordFromTurn));
+      setThread({ id: inv.id, title: inv.title });
+    } catch (e) {
+      setRecords([]);
+      setThread({ id: null, title: null });
+      alert(`Could not open the case file: ${(e as Error).message}`);
     }
   }
 
@@ -194,12 +259,23 @@ export function Workspace({ repoId }: { repoId: number }) {
               Relations
             </Tab>
             <Tab
+              active={view.kind === "evolution"}
+              onClick={() => setView({ kind: "evolution" })}
+              icon={Spline}
+              disabled={!historyTarget}
+            >
+              Evolution
+            </Tab>
+            <Tab
               active={view.kind === "history"}
               onClick={() => setView({ kind: "history" })}
               icon={History}
               disabled={!historyTarget}
             >
               History{historyTarget?.label ? ` · ${historyTarget.label}` : ""}
+            </Tab>
+            <Tab active={view.kind === "map"} onClick={() => setView({ kind: "map" })} icon={MapIcon}>
+              Map
             </Tab>
             {view.kind === "commit" || view.kind === "record" ? (
               <Tab active onClick={() => {}} icon={GitCommitHorizontal}>
@@ -232,6 +308,23 @@ export function Workspace({ repoId }: { repoId: number }) {
                 }
                 onOpenCommit={(sha, path) => setView({ kind: "commit", sha, path })}
               />
+            ) : view.kind === "evolution" && historyTarget ? (
+              <EvolutionPanel
+                repoId={repoId}
+                target={historyTarget}
+                onOpenCommit={(sha, path) => setView({ kind: "commit", sha, path })}
+              />
+            ) : view.kind === "map" ? (
+              <ArchitectureMap
+                repoId={repoId}
+                onOpenCode={(path, start, end) =>
+                  openFile(path, start ? { start, end: end ?? start, tone: "evidence" } : null)
+                }
+                onInvestigate={(f) => {
+                  investigateTarget(f);
+                  setView({ kind: "code" });
+                }}
+              />
             ) : view.kind === "history" && historyTarget ? (
               <TimelinePanel
                 repoId={repoId}
@@ -247,12 +340,18 @@ export function Workspace({ repoId }: { repoId: number }) {
         </section>
         <aside className="min-h-0 border-l border-ink-700 bg-ink-900/60">
           <InvestigationPanel
+            repoId={repoId}
             records={records}
+            thread={thread}
             focus={focus}
             onClearFocus={() => setFocus(null)}
             onAsk={investigate}
             onStop={() => abort.current?.abort()}
             onOpenEvidence={openEvidence}
+            onNewThread={newThread}
+            onOpenThread={openThread}
+            onThreadRenamed={(id, title) => setThread((t) => (t.id === id ? { ...t, title } : t))}
+            onThreadDeleted={(id) => thread.id === id && newThread()}
           />
         </aside>
       </div>
