@@ -23,7 +23,7 @@ jobs:
     env:
       TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@localhost:5432
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
       - run: uv sync
       - run: uv run ruff check app tests
@@ -35,8 +35,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -44,6 +44,6 @@ jobs:
       # npm ci rejects this lockfile on Linux (an npm bug with optional wasm
       # dependencies), so install from package.json with the lockfile as a guide.
       - run: npm install --no-audit --no-fund
-      - run: npx tsc --noEmit
       - run: npm run lint
+      # Generates Next's route types, then type-checks and builds.
       - run: npm run build
