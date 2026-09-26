@@ -1,5 +1,8 @@
 # Codebase Archaeologist
 
+[![CI](https://github.com/Its-Aditya-Singhal/codebase-archaeologist/actions/workflows/ci.yml/badge.svg)](https://github.com/Its-Aditya-Singhal/codebase-archaeologist/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An investigation tool that explains software repositories: what the code does, **why it exists,
 where it came from, and how it evolved**. It answers from evidence retrieved from the repository
 and cites every source, so the developer can check it.
