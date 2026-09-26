@@ -21,6 +21,8 @@ log = logging.getLogger(__name__)
 
 API = "https://generativelanguage.googleapis.com/v1beta/models"
 TIMEOUT = httpx.Timeout(15.0, read=300.0)
+# Rate limits and temporary overloads: worth trying the fallback model.
+RETRYABLE = {429, 500, 502, 503, 504}
 
 
 class GeminiError(RuntimeError):
@@ -52,6 +54,9 @@ def _error(resp: httpx.Response) -> GeminiError:
     elif resp.status_code == 429:
         message = ("Gemini free-tier rate limit reached (requests per minute or per day). "
                    "Wait a minute and retry; daily limits reset at midnight Pacific time.")
+    elif resp.status_code in RETRYABLE:
+        message = ("Gemini is temporarily overloaded (a Google-side issue, not your key). "
+                   "Retry in a minute. The retrieved evidence is still shown.")
     return GeminiError(message, resp.status_code)
 
 
@@ -75,8 +80,9 @@ def stream(system: str, messages: list[dict], temperature: float = 0.2) -> Itera
             if resp.status_code != 200:
                 resp.read()
                 err = _error(resp)
-                if resp.status_code == 429 and i + 1 < len(models):
-                    log.info("Gemini %s rate limited; falling back to %s", model, models[i + 1])
+                if resp.status_code in RETRYABLE and i + 1 < len(models):
+                    log.info("Gemini %s unavailable (%s); falling back to %s",
+                             model, resp.status_code, models[i + 1])
                     continue
                 raise err
             for line in resp.iter_lines():
@@ -112,7 +118,7 @@ def generate(system: str, contents: list[dict], tools: list[dict]) -> tuple[str,
     for i, model in enumerate(models):
         resp = httpx.post(f"{API}/{model}:generateContent", headers=_headers(), json=body,
                           timeout=TIMEOUT)
-        if resp.status_code == 429 and i + 1 < len(models):
+        if resp.status_code in RETRYABLE and i + 1 < len(models):
             continue
         if resp.status_code != 200:
             raise _error(resp)

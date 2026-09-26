@@ -84,6 +84,20 @@ def test_rate_limit_falls_back_to_lighter_model(monkeypatch, settings):
     assert len(urls) == 2
 
 
+def test_overload_falls_back_then_explains(monkeypatch, settings):
+    urls = []
+
+    def fake_stream(method, url, **kw):
+        urls.append(url)
+        return FakeStream(503, body={"error": {"message": "This model is experiencing high "
+                                                          "demand."}})
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+    with pytest.raises(gemini.GeminiError, match="temporarily overloaded"):
+        list(gemini.stream("system", [{"role": "user", "content": "q"}]))
+    assert len(urls) == 2  # main model, then the fallback
+
+
 def test_invalid_key_is_explained(monkeypatch, settings):
     monkeypatch.setattr(httpx, "stream", lambda *a, **kw: FakeStream(
         400, body={"error": {"message": "API key not valid. Please pass a valid API key."}}))
